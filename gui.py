@@ -11,10 +11,22 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from shutil import which
 
 
 APP_TITLE = "Codex Supervisor"
 CLI_SENTINEL = "--__supervisor_cli__"
+
+
+def default_codex_path() -> str:
+    """Return the best-guess codex binary path."""
+    found = which("codex")
+    if found:
+        return found
+    home_candidate = pathlib.Path.home() / "codex" / "bin" / "codex"
+    if home_candidate.exists():
+        return str(home_candidate)
+    return "codex"
 
 
 def _maybe_run_cli() -> None:
@@ -65,7 +77,7 @@ class SupervisorGUI(tk.Tk):
         tk.Button(config_frame, text="Choose", command=self._browse_repo).grid(row=2, column=2, padx=5)
 
         tk.Label(config_frame, text="Codex CLI path:").grid(row=3, column=0, sticky="w")
-        self.codex_cli_var = tk.StringVar(value="codex")
+        self.codex_cli_var = tk.StringVar(value=default_codex_path())
         tk.Entry(config_frame, textvariable=self.codex_cli_var, width=60).grid(row=3, column=1, sticky="we", padx=5)
 
         self.auto_protocol_var = tk.BooleanVar(value=True)
