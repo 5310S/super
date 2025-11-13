@@ -244,6 +244,7 @@ class AgentSession:
         self.output_line_limit = output_line_limit
         self.use_script_wrapper = use_script_wrapper
         self._cursor_query = CURSOR_POSITION_QUERY
+        self._cursor_response = CURSOR_POSITION_RESPONSE.encode()
         self.process: Optional[asyncio.subprocess.Process] = None
         self._stdout_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
@@ -382,11 +383,8 @@ class AgentSession:
     async def _respond_cursor_position(self) -> None:
         if not self.process or not self.process.stdin:
             return
-        try:
-            self.process.stdin.write(CURSOR_POSITION_RESPONSE.encode())
-            await self.process.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        self.process.stdin.write(self._cursor_response)
+        await self.process.stdin.drain()
 
 
 def read_prompt(name: str, inline: Optional[str], path: Optional[str]) -> str:
