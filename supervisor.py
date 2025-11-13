@@ -264,6 +264,7 @@ class AgentSession:
         self.stdout_queue = asyncio.Queue()
         self._stdout_task = asyncio.create_task(self._pump_stream(self.process.stdout, "STDOUT"))
         self._stderr_task = asyncio.create_task(self._pump_stream(self.process.stderr, "STDERR"))
+        await self._respond_cursor_position()
         await self.send(self.role_prompt)
 
     async def _pump_stream(self, stream: asyncio.StreamReader, label: str) -> None:
