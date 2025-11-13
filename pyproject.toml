@@ -21,3 +21,6 @@ dev = [
 [project.scripts]
 "codex-supervisor" = "supervisor:main"
 "codex-supervisor-gui" = "gui:main"
+
+[tool.setuptools]
+py-modules = ["supervisor", "gui"]
