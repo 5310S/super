@@ -232,6 +232,7 @@ class AgentSession:
         extra_args: List[str],
         log_dir: pathlib.Path,
         output_line_limit: Optional[int] = None,
+        use_script_wrapper: bool = True,
     ) -> None:
         self.name = name
         self.role_prompt = role_prompt.strip() + "\n"
@@ -239,6 +240,7 @@ class AgentSession:
         self.extra_args = extra_args
         self.log_dir = log_dir
         self.output_line_limit = output_line_limit
+        self.use_script_wrapper = use_script_wrapper
         self.process: Optional[asyncio.subprocess.Process] = None
         self._stdout_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
@@ -248,7 +250,7 @@ class AgentSession:
         self.log_file = (log_dir / f"{name.lower()}.log").open("a", encoding="utf-8")
 
     async def start(self) -> None:
-        argv = [self.command, *self.extra_args]
+        argv = self._build_command()
         self._log_meta("SUPERVISOR", f"Starting: {' '.join(shlex.quote(a) for a in argv)}")
         self.process = await asyncio.create_subprocess_exec(
             *argv,
@@ -360,6 +362,16 @@ class AgentSession:
         timestamp = _dt.datetime.utcnow().isoformat(timespec="seconds")
         self.log_file.write(f"{timestamp} [{channel}] {message}\n")
         self.log_file.flush()
+
+    def _build_command(self) -> List[str]:
+        argv = [self.command, *self.extra_args]
+        if not self.use_script_wrapper:
+            return argv
+        script_bin = shutil.which("script")
+        if not script_bin:
+            self._log_meta("SUPERVISOR", "script command not found; launching without PTY wrapper")
+            return argv
+        return [script_bin, "-q", "/dev/null", *argv]
 
 
 def read_prompt(name: str, inline: Optional[str], path: Optional[str]) -> str:
@@ -923,6 +935,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable git status/diff snapshots per turn.",
     )
     parser.add_argument(
+        "--no-script-wrapper",
+        action="store_false",
+        dest="use_script_wrapper",
+        help="Disable the 'script' pseudo-terminal wrapper around Codex CLI processes.",
+    )
+    parser.set_defaults(use_script_wrapper=True)
+    parser.add_argument(
         "--auto-commit-each-turn",
         action="store_true",
         help="Auto-commit repository changes after every builder turn.",
@@ -995,6 +1014,7 @@ async def main_async(args: argparse.Namespace) -> None:
         extra_args=shlex.split(args.builder_args),
         log_dir=log_base,
         output_line_limit=args.max_agent_output_lines,
+        use_script_wrapper=args.use_script_wrapper,
     )
     reviewer = AgentSession(
         name="Reviewer",
@@ -1003,6 +1023,7 @@ async def main_async(args: argparse.Namespace) -> None:
         extra_args=shlex.split(args.reviewer_args),
         log_dir=log_base,
         output_line_limit=args.max_agent_output_lines,
+        use_script_wrapper=args.use_script_wrapper,
     )
 
     await asyncio.gather(builder.start(), reviewer.start())
