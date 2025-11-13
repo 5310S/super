@@ -6,7 +6,7 @@ Supervisor orchestrates two Codex CLI agents – a Builder and a Reviewer – so
 - **Structured protocol:** Reviewer must emit `SUMMARY`, `PROMPT`, `FILES`, `CONTEXT` blocks plus the `<<REVIEWER_DONE>>` marker. Builder responses are bounded and marker-terminated to prevent runaway output.
 - **Rich context feeds:** Every reviewer turn includes `git status -sb`, `git diff --stat`, the previous builder report, and summaries of automatic tool runs. Builder prompts can include reviewer-selected file excerpts and extra context text.
 - **Automatic tools & commits:** Configure repeated commands (tests, lint, etc.) with `--builder-tool`. Their output flows back into the next Reviewer/Builder turn. Optional `--auto-commit-each-turn` / `--auto-commit-final` hooks keep the repo up to date once work is reviewed.
-- **Artifact logging & resilience:** Each session writes to `logs/session-*/turns.jsonl`, `transcript.md`, optional git snapshots, and an incremental `state.json`. Combined with automatic Codex restarts and `--resume-session`, you can list, view, or continue any run without losing context.
+- **Artifact logging & resilience:** Each session writes to `~/.codex-supervisor/logs/session-*/turns.jsonl`, `transcript.md`, optional git snapshots, and an incremental `state.json`. Combined with automatic Codex restarts and `--resume-session`, you can list, view, or continue any run without losing context.
 - **Configurable everything:** Use CLI flags or a YAML/JSON config file to set repo paths, timeouts, context line limits, tool timeouts, commit templates, etc.
 - **Manual REPL fallback:** Skip `--auto-protocol` to drive either agent interactively with `b:` / `r:` prompts.
 
@@ -54,6 +54,7 @@ pip install pyinstaller
 pyinstaller --windowed --name "Codex Supervisor" gui.py
 open dist/Codex\ Supervisor.app
 ```
+Make sure the `Codex CLI path` field points to your installed `codex` binary (defaults to `codex`, so it works if the CLI is on `PATH`).
 
 ### Manual REPL
 ```bash

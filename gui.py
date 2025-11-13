@@ -64,9 +64,13 @@ class SupervisorGUI(tk.Tk):
         tk.Entry(config_frame, textvariable=self.repo_var, width=60).grid(row=2, column=1, sticky="we", padx=5)
         tk.Button(config_frame, text="Choose", command=self._browse_repo).grid(row=2, column=2, padx=5)
 
+        tk.Label(config_frame, text="Codex CLI path:").grid(row=3, column=0, sticky="w")
+        self.codex_cli_var = tk.StringVar(value="codex")
+        tk.Entry(config_frame, textvariable=self.codex_cli_var, width=60).grid(row=3, column=1, sticky="we", padx=5)
+
         self.auto_protocol_var = tk.BooleanVar(value=True)
         tk.Checkbutton(config_frame, text="Enable auto protocol", variable=self.auto_protocol_var).grid(
-            row=3, column=0, sticky="w", pady=(5, 0)
+            row=4, column=0, sticky="w", pady=(5, 0)
         )
 
         self.auto_commit_var = tk.BooleanVar(value=True)
@@ -74,7 +78,7 @@ class SupervisorGUI(tk.Tk):
             config_frame,
             text="Auto commit when reviewer approves",
             variable=self.auto_commit_var,
-        ).grid(row=3, column=1, sticky="w", pady=(5, 0))
+        ).grid(row=4, column=1, sticky="w", pady=(5, 0))
 
         config_frame.columnconfigure(1, weight=1)
 
@@ -136,6 +140,9 @@ class SupervisorGUI(tk.Tk):
                 cmd.append("--auto-protocol")
             if self.auto_commit_var.get():
                 cmd.append("--auto-commit-final")
+            cli_value = self.codex_cli_var.get().strip()
+            if cli_value:
+                cmd.extend(["--codex-cli", cli_value])
 
         self._log_line(f"Launching: {' '.join(cmd)}\n")
         try:

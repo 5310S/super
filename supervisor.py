@@ -10,6 +10,7 @@ import json
 import pathlib
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -954,6 +955,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_codex_cli(cli: str) -> str:
+    """Return an absolute path to the Codex CLI binary, ensuring it exists."""
+    candidate = pathlib.Path(cli).expanduser()
+    if candidate.is_absolute():
+        if candidate.exists():
+            return str(candidate)
+        raise FileNotFoundError(f"Codex CLI not found at {candidate}")
+    if candidate.exists():
+        return str(candidate.resolve())
+    found = shutil.which(cli)
+    if found:
+        return found
+    raise FileNotFoundError(f"Could not locate Codex CLI '{cli}'. Install it or pass --codex-cli /path/to/codex.")
+
+
 async def main_async(args: argparse.Namespace) -> None:
     log_base = pathlib.Path(args.log_dir).expanduser().resolve()
     log_base.mkdir(parents=True, exist_ok=True)
@@ -1039,6 +1055,10 @@ def main() -> None:
         args = parser.parse_args()
     if args.auto_protocol and not args.objective:
         parser.error("--objective is required when --auto-protocol is enabled.")
+    try:
+        args.codex_cli = resolve_codex_cli(args.codex_cli)
+    except FileNotFoundError as exc:
+        parser.error(str(exc))
     try:
         asyncio.run(main_async(args))
     except KeyboardInterrupt:
