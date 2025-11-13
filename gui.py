@@ -20,12 +20,16 @@ CLI_SENTINEL = "--__supervisor_cli__"
 
 def default_codex_path() -> str:
     """Return the best-guess codex binary path."""
+    candidates = []
     found = which("codex")
     if found:
         return found
-    home_candidate = pathlib.Path.home() / "codex" / "bin" / "codex"
-    if home_candidate.exists():
-        return str(home_candidate)
+    candidates.append(pathlib.Path.home() / "codex" / "bin" / "codex")
+    candidates.append(pathlib.Path("/opt/homebrew/bin/codex"))
+    candidates.append(pathlib.Path("/usr/local/bin/codex"))
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
     return "codex"
 
 
