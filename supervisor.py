@@ -39,6 +39,8 @@ when needed and stop when the project goal is satisfied.\
 DEFAULT_REVIEWER_MARKER = "<<REVIEWER_DONE>>"
 DEFAULT_BUILDER_MARKER = "<<BUILDER_DONE>>"
 DEFAULT_COMMIT_TEMPLATE = "Supervisor turn {turn}: {summary}"
+CURSOR_POSITION_QUERY = "\x1b[6n"
+CURSOR_POSITION_RESPONSE = "\x1b[1;1R"
 
 
 @dataclass
@@ -241,6 +243,7 @@ class AgentSession:
         self.log_dir = log_dir
         self.output_line_limit = output_line_limit
         self.use_script_wrapper = use_script_wrapper
+        self._cursor_query = CURSOR_POSITION_QUERY
         self.process: Optional[asyncio.subprocess.Process] = None
         self._stdout_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
@@ -277,6 +280,8 @@ class AgentSession:
             sys.stdout.flush()
             if label == "STDOUT" and self.stdout_queue is not None:
                 await self.stdout_queue.put(decoded)
+                if self._cursor_query in decoded:
+                    await self._respond_cursor_position()
         if label == "STDOUT" and self.stdout_queue is not None:
             await self.stdout_queue.put(None)
 
@@ -372,6 +377,15 @@ class AgentSession:
             self._log_meta("SUPERVISOR", "script command not found; launching without PTY wrapper")
             return argv
         return [script_bin, "-q", "/dev/null", *argv]
+
+    async def _respond_cursor_position(self) -> None:
+        if not self.process or not self.process.stdin:
+            return
+        try:
+            self.process.stdin.write(CURSOR_POSITION_RESPONSE.encode())
+            await self.process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
 
 def read_prompt(name: str, inline: Optional[str], path: Optional[str]) -> str:
