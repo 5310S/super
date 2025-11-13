@@ -17,6 +17,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+DEFAULT_LOG_DIR = pathlib.Path.home() / ".codex-supervisor" / "logs"
 try:
     import yaml  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency is documented in README
@@ -853,7 +854,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to a file containing the reviewer prompt.",
     )
-    parser.add_argument("--log-dir", default="logs", help="Directory where per-session artifacts are stored.")
+    parser.add_argument(
+        "--log-dir",
+        default=str(DEFAULT_LOG_DIR),
+        help=f"Directory where per-session artifacts are stored (default: {DEFAULT_LOG_DIR}).",
+    )
     parser.add_argument("--repo-path", default=".", help="Path to the repository the agents should operate on.")
     parser.add_argument("--auto-protocol", action="store_true", help="Enable structured Reviewer → Builder turns.")
     parser.add_argument("--objective", default=None, help="Shared project objective (required for auto protocol).")
@@ -951,6 +956,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 async def main_async(args: argparse.Namespace) -> None:
     log_base = pathlib.Path(args.log_dir).expanduser().resolve()
+    log_base.mkdir(parents=True, exist_ok=True)
     repo_path = pathlib.Path(args.repo_path).expanduser().resolve()
 
     if args.list_sessions:

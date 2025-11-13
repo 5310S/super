@@ -102,7 +102,7 @@ CONTEXT: optional extra details
 Builder should apply the instructions, run any needed repo commands, summarize the work, and finish with `<<BUILDER_DONE>>`. Output is capped with `--max-agent-output-lines` to prevent runaway transcripts.
 
 ## Session Management
-- `--log-dir logs` (default) stores transcripts. Each auto-protocol run creates `logs/session-YYYYmmdd-HHMMSS/` unless `--resume-session` is provided.
+- `--log-dir` now defaults to `~/.codex-supervisor/logs`. Each auto-protocol run creates `session-YYYYmmdd-HHMMSS/` folders there unless you pass a custom path (relative paths resolve against your current working directory).
 - Every session folder contains `state.json`, which tracks the latest reviewer summary, builder report, and completed turn so `--resume-session` can pick up mid-stream.
 - `codex-supervisor --list-sessions` lists known sessions.
 - `codex-supervisor --show-session session-20240101-120000` prints the Markdown transcript.
