@@ -1,0 +1,8 @@
+.venv/
+build/
+dist/
+*.spec
+__pycache__/
+*.egg-info/
+CodexSupervisor.iconset/
+tests/__pycache__/

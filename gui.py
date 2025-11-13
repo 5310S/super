@@ -14,7 +14,23 @@ from tkinter import filedialog, messagebox
 
 
 APP_TITLE = "Codex Supervisor"
-SCRIPT_PATH = pathlib.Path(__file__).resolve().parent / "supervisor.py"
+CLI_SENTINEL = "--__supervisor_cli__"
+
+
+def _maybe_run_cli() -> None:
+    """If invoked with the sentinel flag, run the supervisor CLI and exit."""
+    if CLI_SENTINEL not in sys.argv:
+        return
+    idx = sys.argv.index(CLI_SENTINEL)
+    cli_args = sys.argv[idx + 1 :]
+    sys.argv = ["codex-supervisor", *cli_args]
+    from supervisor import main as supervisor_main
+
+    supervisor_main()
+    sys.exit(0)
+
+
+_maybe_run_cli()
 
 
 class SupervisorGUI(tk.Tk):
@@ -103,11 +119,7 @@ class SupervisorGUI(tk.Tk):
         if self.process:
             messagebox.showwarning(APP_TITLE, "Supervisor is already running.")
             return
-        if not SCRIPT_PATH.exists():
-            messagebox.showerror(APP_TITLE, f"Could not find supervisor script at {SCRIPT_PATH}")
-            return
-
-        cmd = [sys.executable, str(SCRIPT_PATH)]
+        cmd = [sys.executable, CLI_SENTINEL]
         config_path = self.config_var.get().strip()
         if config_path:
             cmd.extend(["--config", config_path])

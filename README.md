@@ -23,6 +23,24 @@ Or run the bundled helper script:
 bash install.sh
 ```
 
+### Optional: Build a macOS `.app`
+1. Install PyInstaller inside the virtual env: `pip install pyinstaller`.
+2. Convert the included icon (`assets/icon.png`) into `.icns`:
+   ```bash
+   mkdir -p CodexSupervisor.iconset
+   sips -z 1024 1024 assets/icon.png --out CodexSupervisor.iconset/icon_512x512@2x.png
+   sips -z 512 512 assets/icon.png --out CodexSupervisor.iconset/icon_512x512.png
+   sips -z 256 256 assets/icon.png --out CodexSupervisor.iconset/icon_256x256.png
+   sips -z 128 128 assets/icon.png --out CodexSupervisor.iconset/icon_128x128.png
+   sips -z 64 64 assets/icon.png --out CodexSupervisor.iconset/icon_32x32@2x.png
+   sips -z 32 32 assets/icon.png --out CodexSupervisor.iconset/icon_32x32.png
+   sips -z 16 16 assets/icon.png --out CodexSupervisor.iconset/icon_16x16.png
+   cp CodexSupervisor.iconset/icon_32x32.png CodexSupervisor.iconset/icon_16x16@2x.png
+   iconutil -c icns CodexSupervisor.iconset
+   ```
+3. Build the bundle: `pyinstaller --windowed --icon CodexSupervisor.icns --name "Codex Supervisor" gui.py`
+4. Launch/pin it: `open dist/Codex\ Supervisor.app` → right-click Dock icon → Keep in Dock.
+
 ## Usage
 ### macOS GUI Launcher
 ```bash
