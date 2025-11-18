@@ -16,7 +16,7 @@ import sys
 import textwrap
 from contextlib import suppress
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Protocol
 
 DEFAULT_LOG_DIR = pathlib.Path.home() / ".codex-supervisor" / "logs"
 try:
@@ -24,23 +24,21 @@ try:
 except ImportError:  # pragma: no cover - optional dependency is documented in README
     yaml = None
 
-DEFAULT_BUILDER_PROMPT = """\
-You are the Builder agent. Execute commands, edit files, and implement the \
-tasks provided by the Reviewer. Keep responses concise and focus on code and \
-terminal output that the Reviewer needs.\
-"""
+DEFAULT_BUILDER_PROMPT = (
+    "You are the Builder agent. Execute commands, edit files, and implement the tasks provided by the Reviewer. "
+    "Keep responses concise and focus on code and terminal output that the Reviewer needs."
+)
 
-DEFAULT_REVIEWER_PROMPT = """\
-You are the Reviewer agent. Inspect repository changes, craft precise prompts \
-for the Builder, and keep a concise record of progress. Ask for clarification \
-when needed and stop when the project goal is satisfied.\
-"""
+DEFAULT_REVIEWER_PROMPT = (
+    "You are the Reviewer agent. Inspect repository changes, craft precise prompts for the Builder, and keep a concise "
+    "record of progress. Ask for clarification when needed and stop when the project goal is satisfied."
+)
 
 DEFAULT_REVIEWER_MARKER = "<<REVIEWER_DONE>>"
 DEFAULT_BUILDER_MARKER = "<<BUILDER_DONE>>"
 DEFAULT_COMMIT_TEMPLATE = "Supervisor turn {turn}: {summary}"
-CURSOR_POSITION_QUERY = "\x1b[6n"
-CURSOR_POSITION_RESPONSE = "\x1b[1;1R"
+EXCERPT_MAX_BYTES = 200_000  # cap size of reviewer-requested excerpts (~200 KB)
+BINARY_SNIFF_BYTES = 2048
 
 
 @dataclass
@@ -121,6 +119,10 @@ class SessionRecorder:
         }
         self.state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def _handle_record_error(self, state: SessionState, exc: OSError) -> None:
+        print(f"[Supervisor] Failed to persist session artifacts: {exc}", file=sys.stderr, flush=True)
+        self._state = state
+
     def record_turn(
         self,
         *,
@@ -132,61 +134,67 @@ class SessionRecorder:
         tool_summary: str,
         git_snapshot: Optional[Dict[str, str]],
     ) -> None:
-        payload = {
-            "timestamp": _dt.datetime.utcnow().isoformat(timespec="seconds"),
-            "turn": turn,
-            "repo_context": repo_context,
-            "reviewer": reviewer_turn.__dict__,
-            "builder_report": builder_report,
-            "tool_results": [result.as_dict() for result in tool_results],
-            "tool_summary": tool_summary,
-            "git_snapshot": git_snapshot,
-        }
-        self.jsonl.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        self.jsonl.flush()
-        tool_block = "\n\n".join(
-            f"### Tool `{res.name}` (exit {res.exit_code})\n{res.output}" for res in tool_results
+        state = SessionState(
+            last_turn=turn,
+            latest_report=builder_report or "",
+            latest_tool_outputs=tool_summary,
+            latest_reviewer_summary=reviewer_turn.summary or "",
         )
-        snapshot_note = (
-            f"Git snapshots saved to: status={git_snapshot['status']}, diff={git_snapshot['diff']}"
-            if git_snapshot
-            else "Git snapshots disabled or unavailable."
-        )
-        md_block = textwrap.dedent(
-            f"""
-            ## Turn {turn}
-            **Reviewer Summary**\n{reviewer_turn.summary or 'N/A'}
-
-            **Reviewer Prompt**\n{reviewer_turn.prompt}
-
-            **Files Requested**\n{', '.join(reviewer_turn.files) or 'None'}
-
-            **Builder Report**\n{builder_report or 'No builder response captured.'}
-
-            **Repository Context**\n{repo_context}
-
-            **Git Snapshot**\n{snapshot_note}
-
-            **Tools**\n{tool_block or 'No tools executed.'}
-            """
-        ).strip()
-        self.md.write(md_block + "\n\n")
-        self.md.flush()
-        self._write_state(
-            SessionState(
-                last_turn=turn,
-                latest_report=builder_report or "",
-                latest_tool_outputs=tool_summary,
-                latest_reviewer_summary=reviewer_turn.summary or "",
+        try:
+            payload = {
+                "timestamp": _dt.datetime.utcnow().isoformat(timespec="seconds"),
+                "turn": turn,
+                "repo_context": repo_context,
+                "reviewer": reviewer_turn.__dict__,
+                "builder_report": builder_report,
+                "tool_results": [result.as_dict() for result in tool_results],
+                "tool_summary": tool_summary,
+                "git_snapshot": git_snapshot,
+            }
+            self.jsonl.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self.jsonl.flush()
+            tool_block = "\n\n".join(
+                f"### Tool `{res.name}` (exit {res.exit_code})\n{res.output}" for res in tool_results
             )
-        )
+            snapshot_note = (
+                f"Git snapshots saved to: status={git_snapshot['status']}, diff={git_snapshot['diff']}"
+                if git_snapshot
+                else "Git snapshots disabled or unavailable."
+            )
+            md_block = textwrap.dedent(
+                f"""
+                ## Turn {turn}
+                **Reviewer Summary**\n{reviewer_turn.summary or 'N/A'}
+
+                **Reviewer Prompt**\n{reviewer_turn.prompt}
+
+                **Files Requested**\n{', '.join(reviewer_turn.files) or 'None'}
+
+                **Builder Report**\n{builder_report or 'No builder response captured.'}
+
+                **Repository Context**\n{repo_context}
+
+                **Git Snapshot**\n{snapshot_note}
+
+                **Tools**\n{tool_block or 'No tools executed.'}
+                """
+            ).strip()
+            self.md.write(md_block + "\n\n")
+            self.md.flush()
+            self._write_state(state)
+        except OSError as exc:
+            self._handle_record_error(state, exc)
 
     def finalize(self, final_summary: Optional[str]) -> None:
-        if final_summary:
-            self.md.write(f"## Final Summary\n{final_summary}\n")
-            self.md.flush()
-        self.jsonl.close()
-        self.md.close()
+        try:
+            if final_summary:
+                self.md.write(f"## Final Summary\n{final_summary}\n")
+                self.md.flush()
+        except OSError as exc:
+            print(f"[Supervisor] Failed to finalize transcript: {exc}", file=sys.stderr, flush=True)
+        finally:
+            self.jsonl.close()
+            self.md.close()
 
     def capture_git_artifacts(self, turn: int, repo_path: pathlib.Path) -> Optional[Dict[str, str]]:
         if not self.save_git_snapshots:
@@ -210,20 +218,123 @@ class SessionRecorder:
         return {"status": str(status_path), "diff": str(diff_path)}
 
 
-class OutputLimitExceeded(RuntimeError):
-    """Raised when an agent emits more output than allowed for a single turn."""
-
-
-class MarkerTimeout(RuntimeError):
-    """Raised when an agent fails to emit its marker or exits prematurely."""
-
-
 class ConfigError(RuntimeError):
     """Raised when configuration files are missing or malformed."""
 
 
-class AgentSession:
-    """Thin wrapper around a Codex CLI subprocess."""
+class AgentInterface(Protocol):
+    async def request(self, prompt: str) -> str:  # pragma: no cover - protocol definition
+        ...
+
+
+def parse_codex_exec_output(
+    stream: str,
+    *,
+    warn: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Extract the final agent message from codex exec --json output."""
+    if not stream:
+        return ""
+    messages: List[str] = []
+    for line in stream.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            if warn:
+                warn(f"Failed to parse codex exec JSON line: {line[:160]}")
+            continue
+        if payload.get("type") != "item.completed":
+            continue
+        item = payload.get("item") or {}
+        if item.get("type") == "agent_message":
+            text = (item.get("text") or "").strip()
+            if text:
+                messages.append(text)
+    return "\n\n".join(messages).strip() if messages else stream.strip()
+
+
+def summarize_codex_event(
+    line: str,
+    *,
+    warn: Optional[Callable[[str], None]] = None,
+) -> Optional[str]:
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        if warn:
+            warn(f"Failed to parse codex exec event line: {line[:160]}")
+        return None
+    event_type = payload.get("type")
+    if event_type == "thread.started":
+        return "Thread started"
+    if event_type == "turn.started":
+        return "Turn started"
+    if event_type == "turn.completed":
+        usage = payload.get("usage") or {}
+        tokens = usage.get("output_tokens")
+        total = usage.get("total_tokens")
+        context_window = (
+            usage.get("context_window")
+            or usage.get("context_limit")
+            or payload.get("context_window")
+        )
+        summary = "Turn completed"
+        if tokens is not None:
+            summary += f" (output tokens: {tokens})"
+        if context_window and total is not None:
+            try:
+                window_value = float(context_window)
+                remaining = max(0.0, window_value - float(total))
+                percent = (remaining / window_value) * 100 if window_value else 0.0
+                summary += f" | context left: {int(remaining)} tokens (~{percent:.1f}%)"
+            except (TypeError, ValueError):
+                if warn:
+                    warn(
+                        "Failed to compute context usage from turn.completed event: "
+                        f"context_window={context_window!r}, total_tokens={total!r}"
+                    )
+        return summary
+    if event_type in {"item.started", "item.completed"}:
+        item = payload.get("item") or {}
+        item_type = item.get("type") or "item"
+        if item_type == "reasoning":
+            text = (item.get("text") or "").strip()
+            if not text:
+                return "Reasoning update"
+            prefix = "Reasoning" if event_type == "item.completed" else "Reasoning (in progress)"
+            return f"{prefix}: {text}"
+        if item_type == "agent_message":
+            text = (item.get("text") or "").strip()
+            if not text:
+                return "Agent message (empty)"
+            return f"Agent message:\n{text}"
+        if item_type == "command_execution":
+            command = item.get("command") or ""
+            status = item.get("status")
+            exit_code = item.get("exit_code")
+            output = (item.get("aggregated_output") or "").strip()
+            verb = "Running" if event_type == "item.started" else "Command"
+            summary = verb
+            if command:
+                summary += f": {command}"
+            if status:
+                summary += f" [{status}]"
+            if exit_code is not None:
+                summary += f" (exit {exit_code})"
+            if output:
+                summary += f"\n{output}"
+            return summary
+        return f"{event_type.replace('item.', '')} {item_type}"
+    if warn:
+        warn(f"Unhandled codex exec event: {line[:160]}")
+    return None
+
+
+class CodexExecAgent:
+    """Launches codex exec per request to avoid the interactive TUI."""
 
     def __init__(
         self,
@@ -233,158 +344,100 @@ class AgentSession:
         command: str,
         extra_args: List[str],
         log_dir: pathlib.Path,
-        output_line_limit: Optional[int] = None,
-        use_script_wrapper: bool = True,
+        repo_path: pathlib.Path,
+        completion_marker: str,
+        show_json: bool,
     ) -> None:
         self.name = name
-        self.role_prompt = role_prompt.strip() + "\n"
+        self.role_prompt = role_prompt.strip()
         self.command = command
         self.extra_args = extra_args
-        self.log_dir = log_dir
-        self.output_line_limit = output_line_limit
-        self.use_script_wrapper = use_script_wrapper
-        self._cursor_query = CURSOR_POSITION_QUERY
-        self._cursor_response = CURSOR_POSITION_RESPONSE.encode()
-        self.process: Optional[asyncio.subprocess.Process] = None
-        self._stdout_task: Optional[asyncio.Task] = None
-        self._stderr_task: Optional[asyncio.Task] = None
-        self.stdout_queue: Optional[asyncio.Queue[Optional[str]]] = None
-        self._restart_lock = asyncio.Lock()
+        self.repo_path = repo_path
+        self.completion_marker = completion_marker
+        self.show_json = show_json
         log_dir.mkdir(parents=True, exist_ok=True)
-        self.log_file = (log_dir / f"{name.lower()}.log").open("a", encoding="utf-8")
+        self.log_file = (log_dir / f"{name.lower()}_exec.log").open("a", encoding="utf-8")
 
-    async def start(self) -> None:
-        argv = self._build_command()
-        self._log_meta("SUPERVISOR", f"Starting: {' '.join(shlex.quote(a) for a in argv)}")
-        self.process = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    async def request(self, payload: str) -> str:
+        prompt = "\n\n".join(part for part in (self.role_prompt, payload.strip()) if part).strip()
+        return await asyncio.to_thread(self._run_once, prompt)
+
+    def _run_once(self, prompt: str) -> str:
+        cmd = [
+            self.command,
+            "exec",
+            "--json",
+            "--color",
+            "never",
+            *self.extra_args,
+            prompt,
+        ]
+        self._log(
+            "SUPERVISOR",
+            f"Running codex exec ({self.name}) with extra args: {self.extra_args} | prompt preview: {prompt[:120]}",
         )
-        self.stdout_queue = asyncio.Queue()
-        self._stdout_task = asyncio.create_task(self._pump_stream(self.process.stdout, "STDOUT"))
-        self._stderr_task = asyncio.create_task(self._pump_stream(self.process.stderr, "STDERR"))
-        await self._respond_cursor_position()
-        await self.send(self.role_prompt)
-
-    async def _pump_stream(self, stream: asyncio.StreamReader, label: str) -> None:
-        if stream is None:
-            return
-        while True:
-            line = await stream.readline()
-            if not line:
-                break
-            decoded = line.decode(errors="replace")
-            self._log_meta(label, decoded.rstrip("\n"))
-            prefix = f"[{self.name}][{label}] "
-            sys.stdout.write(prefix + decoded)
-            sys.stdout.flush()
-            if label == "STDOUT" and self.stdout_queue is not None:
-                await self.stdout_queue.put(decoded)
-                if self._cursor_query in decoded:
-                    await self._respond_cursor_position()
-        if label == "STDOUT" and self.stdout_queue is not None:
-            await self.stdout_queue.put(None)
-
-    async def send(self, text: str) -> None:
-        if not text:
-            return
-        await self.ensure_running()
-        if not text.endswith("\n"):
-            text += "\n"
-        if not self.process or not self.process.stdin:
-            raise RuntimeError(f"{self.name} process is not running")
-        self.process.stdin.write(text.encode())
-        await self.process.stdin.drain()
-        for line in text.rstrip("\n").splitlines():
-            self._log_meta("PROMPT", line)
-
-    async def read_until_marker(self, marker: str, timeout: Optional[float] = None) -> str:
-        if self.stdout_queue is None:
-            raise RuntimeError(f"{self.name} session is not initialized for marker reads")
-        await self.ensure_running()
-        buffer: List[str] = []
-        line_count = 0
+        print(f"[Supervisor] Launching codex exec for {self.name}...", flush=True)
         try:
-            while True:
-                line = await asyncio.wait_for(self.stdout_queue.get(), timeout)
-                if line is None:
-                    raise MarkerTimeout(
-                        f"{self.name} STDOUT closed before emitting marker {marker}"
-                    )
-                stripped = line.strip()
-                if stripped == marker:
-                    return "".join(buffer).strip()
-                buffer.append(line)
-                line_count += 1
-                if self.output_line_limit and line_count >= self.output_line_limit:
-                    raise OutputLimitExceeded(
-                        f"{self.name} produced more than {self.output_line_limit} lines without {marker}."
-                    )
-        except asyncio.TimeoutError as exc:
-            raise MarkerTimeout(f"{self.name} did not emit marker {marker} in time.") from exc
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=self.repo_path,
+            )
+        except FileNotFoundError as exc:
+            message = f"Codex CLI not found while running {self.name}: {exc}"
+            self._warn(message)
+            raise RuntimeError(message) from exc
+        stdout_lines: List[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            stdout_lines.append(line)
+            stripped = line.rstrip("\n")
+            if stripped:
+                self._log("JSON", stripped)
+                if self.show_json:
+                    print(f"[{self.name}][JSON] {stripped}", flush=True)
+                else:
+                    summary = summarize_codex_event(stripped, warn=self._warn)
+                    if summary:
+                        print(f"[{self.name}] {summary}", flush=True)
+                    else:
+                        print(f"[{self.name}] {stripped}", flush=True)
+        proc.wait()
+        stderr = ""
+        if proc.stderr:
+            stderr = proc.stderr.read()
+            if stderr.strip():
+                self._log("STDERR", stderr.strip())
+                print(f"[{self.name}][STDERR] {stderr.strip()}", flush=True)
+        if proc.returncode != 0:
+            failure = stderr.strip() or "".join(stdout_lines).strip()
+            message = f"{self.name} codex exec failed with exit code {proc.returncode}: {failure}"
+            self._warn(message)
+            raise RuntimeError(message)
+        stdout = "".join(stdout_lines)
+        message = parse_codex_exec_output(stdout, warn=self._warn)
+        cleaned = self._strip_marker(message)
+        if cleaned:
+            self._log("STDOUT", cleaned)
+        return cleaned
 
-    async def stop(self) -> None:
-        if not self.process:
-            return
-        if self.process.returncode is None:
-            self._log_meta("SUPERVISOR", "Terminating process")
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                self._log_meta("SUPERVISOR", "Force killing process")
-                self.process.kill()
-        await self._close_stream_tasks()
-        self.stdout_queue = None
-        self.log_file.close()
+    def _strip_marker(self, text: str) -> str:
+        marker = self.completion_marker.strip()
+        if marker and marker in text:
+            text = text.replace(marker, "")
+        return text.strip()
 
-    async def restart(self) -> None:
-        self._log_meta("SUPERVISOR", "Restarting Codex process")
-        await self.stop()
-        await self.start()
-
-    async def ensure_running(self) -> None:
-        async with self._restart_lock:
-            if self.process and self.process.returncode is None:
-                return
-            if self.process and self.process.returncode is not None:
-                self._log_meta(
-                    "SUPERVISOR",
-                    f"Process exited with code {self.process.returncode}; attempting restart",
-                )
-            await self.restart()
-
-    async def _close_stream_tasks(self) -> None:
-        for task in (self._stdout_task, self._stderr_task):
-            if not task:
-                continue
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-
-    def _log_meta(self, channel: str, message: str) -> None:
+    def _log(self, channel: str, message: str) -> None:
         timestamp = _dt.datetime.utcnow().isoformat(timespec="seconds")
         self.log_file.write(f"{timestamp} [{channel}] {message}\n")
         self.log_file.flush()
 
-    def _build_command(self) -> List[str]:
-        argv = [self.command, *self.extra_args]
-        if not self.use_script_wrapper:
-            return argv
-        script_bin = shutil.which("script")
-        if not script_bin:
-            self._log_meta("SUPERVISOR", "script command not found; launching without PTY wrapper")
-            return argv
-        return [script_bin, "-q", "/dev/null", *argv]
-
-    async def _respond_cursor_position(self) -> None:
-        if not self.process or not self.process.stdin:
-            return
-        self.process.stdin.write(self._cursor_response)
-        await self.process.stdin.drain()
+    def _warn(self, message: str) -> None:
+        self._log("WARN", message)
+        print(f"[{self.name}][WARN] {message}", file=sys.stderr, flush=True)
 
 
 def read_prompt(name: str, inline: Optional[str], path: Optional[str]) -> str:
@@ -398,20 +451,42 @@ def read_prompt(name: str, inline: Optional[str], path: Optional[str]) -> str:
     return DEFAULT_BUILDER_PROMPT if name == "Builder" else DEFAULT_REVIEWER_PROMPT
 
 
-def add_marker_instruction(base_prompt: str, marker: str, role: str) -> str:
-    cleaned = base_prompt.rstrip()
+def build_role_prompt(role: str, marker: str) -> str:
     if role == "Builder":
-        instruction = (
-            f"Supervisor protocol: When you consider a task complete, summarize the work, "
-            f"then emit a line containing only {marker}. Do not add content after the marker."
+        instructions = (
+            "You are the Builder agent. Execute commands, edit files, and implement the tasks provided by the Reviewer. "
+            "Keep responses concise and focus on code and terminal output that the Reviewer needs."
+        )
+        marker_line = (
+            f"Supervisor protocol: When you consider a task complete, summarize the work, then emit a line containing only {marker}. "
+            "Do not add content after the marker."
         )
     else:
-        instruction = (
-            f"Supervisor protocol: After composing actionable guidance for the Builder, "
-            f"finish with a line containing only {marker}. If work is complete, set PROMPT to 'APPROVED' "
-            "before the marker."
+        instructions = (
+            "You are the Reviewer agent. Inspect repository changes, craft precise prompts for the Builder, and keep a concise record of progress. "
+            "Ask for clarification when needed and stop when the project goal is satisfied."
         )
-    return f"{cleaned}\n\n{instruction}\n"
+        marker_line = (
+            f"Supervisor protocol: After composing actionable guidance for the Builder, finish with a line containing only {marker}. "
+            "If work is complete, set PROMPT to 'APPROVED' before the marker."
+        )
+    return f"{instructions}\n\n{marker_line}\n"
+
+
+def build_reviewer_briefing(objective: str, marker: str) -> str:
+    """Return a concise, ASCII-only reviewer briefing to avoid TUI crashes."""
+    lines = [
+        f"Supervisor Objective: {objective}",
+        "Each response must follow this format:",
+        "SUMMARY: 2-3 compact sentences referencing git status/diff/tests",
+        "PROMPT: actionable instructions for the Builder or the word APPROVED",
+        "FILES: optional space/comma separated file paths",
+        "CONTEXT: optional extra notes",
+        "",
+        f"End every turn with a line containing only {marker}.",
+        "If the project is complete, set PROMPT to APPROVED before that line.",
+    ]
+    return "\n".join(lines).strip()
 
 
 def truncate_lines(text: str, max_lines: int) -> str:
@@ -482,15 +557,6 @@ def parse_reviewer_response(message: str) -> ReviewerTurn:
     return ReviewerTurn(summary=summary, prompt=prompt, files=files, context=context)
 
 
-def parse_repl_input(line: str) -> Tuple[str, str]:
-    lowered = line.lower()
-    for prefix, name in (("b:", "builder"), ("r:", "reviewer"), ("both:", "both"), ("all:", "both")):
-        if lowered.startswith(prefix):
-            payload = line[len(prefix) :].lstrip()
-            return name, payload
-    return "builder", line
-
-
 def load_file_excerpt(repo_path: pathlib.Path, relative_path: str, max_lines: int) -> Tuple[str, str]:
     repo_root = repo_path.resolve()
     file_path = (repo_root / relative_path).resolve()
@@ -502,6 +568,19 @@ def load_file_excerpt(repo_path: pathlib.Path, relative_path: str, max_lines: in
         return relative_path, "(File not found.)"
     if file_path.is_dir():
         return relative_path, "(Path is a directory.)"
+    try:
+        size = file_path.stat().st_size
+    except OSError as exc:
+        return relative_path, f"(Failed to read file metadata: {exc})"
+    if size > EXCERPT_MAX_BYTES:
+        return relative_path, f"(File exceeds excerpt size limit of {EXCERPT_MAX_BYTES} bytes.)"
+    try:
+        with file_path.open("rb") as handle:
+            chunk = handle.read(BINARY_SNIFF_BYTES)
+    except OSError as exc:
+        return relative_path, f"(Failed to read file: {exc})"
+    if b"\x00" in chunk:
+        return relative_path, "(Binary file omitted.)"
     text = file_path.read_text(encoding="utf-8", errors="replace")
     excerpt = truncate_lines(text, max_lines)
     return relative_path, excerpt or "(File is empty.)"
@@ -573,8 +652,8 @@ class ProtocolCoordinator:
     def __init__(
         self,
         *,
-        builder: AgentSession,
-        reviewer: AgentSession,
+        builder: AgentInterface,
+        reviewer: AgentInterface,
         objective: str,
         reviewer_marker: str,
         builder_marker: str,
@@ -613,6 +692,7 @@ class ProtocolCoordinator:
         self.commit_template = commit_template
         self.initial_state = initial_state
         self.start_turn = (initial_state.last_turn + 1) if initial_state else 1
+        self.reviewer_briefing = build_reviewer_briefing(self.objective, self.reviewer_marker)
         self.latest_report = (
             (initial_state.latest_report if initial_state else "") or "No builder output yet."
         )
@@ -626,31 +706,35 @@ class ProtocolCoordinator:
 
     async def run(self) -> None:
         try:
-            await self._prime_reviewer()
             end_turn = self.start_turn + self.max_turns
             for turn in range(self.start_turn, end_turn):
                 print(f"[Supervisor] Turn {turn}: waiting for reviewer instructions...", flush=True)
                 repo_context = collect_repo_context(self.repo_path, self.status_lines, self.diff_lines)
-                await self.reviewer.send(
-                    textwrap.dedent(
-                        f"""
-                        [Supervisor] Objective: {self.objective}
-                        [Supervisor] Latest builder report:\n{self.latest_report}
+                reviewer_payload = textwrap.dedent(
+                    f"""
+                    {self.reviewer_briefing}
 
-                        [Supervisor] Latest tool runs:\n{self.latest_tool_outputs}
+                    [Supervisor] Objective: {self.objective}
+                    [Supervisor] Latest builder report:
+                    {self.latest_report}
 
-                        [Supervisor] Repository context:\n{repo_context}
+                    [Supervisor] Latest tool runs:
+                    {self.latest_tool_outputs}
 
-                        Respond using SUMMARY/PROMPT/FILES/CONTEXT blocks and end with {self.reviewer_marker}.
-                        """
-                    ).strip()
-                )
+                    [Supervisor] Repository context:
+                    {repo_context}
+                    """
+                ).strip()
                 try:
-                    reviewer_message = await self.reviewer.read_until_marker(
-                        self.reviewer_marker, timeout=self.turn_timeout
-                    )
-                except (MarkerTimeout, OutputLimitExceeded) as exc:
+                    reviewer_message = await self.reviewer.request(reviewer_payload)
+                except RuntimeError as exc:
                     print(f"[Supervisor] Reviewer error: {exc}", flush=True)
+                    self._record_turn_error(
+                        turn=turn,
+                        repo_context=repo_context,
+                        error_message=f"Reviewer error: {exc}",
+                        reviewer_turn=None,
+                    )
                     break
                 reviewer_turn = parse_reviewer_response(reviewer_message)
                 self.latest_reviewer_summary = reviewer_turn.summary or "(Reviewer summary missing.)"
@@ -661,13 +745,16 @@ class ProtocolCoordinator:
                 file_excerpts = self._gather_file_excerpts(reviewer_turn.files)
                 builder_payload = self._build_builder_payload(turn, reviewer_turn, file_excerpts)
                 print("[Supervisor] Forwarding reviewer instructions to builder.", flush=True)
-                await self.builder.send(builder_payload)
                 try:
-                    builder_report = await self.builder.read_until_marker(
-                        self.builder_marker, timeout=self.turn_timeout
-                    )
-                except (MarkerTimeout, OutputLimitExceeded) as exc:
+                    builder_report = await self.builder.request(builder_payload)
+                except RuntimeError as exc:
                     print(f"[Supervisor] Builder error: {exc}", flush=True)
+                    self._record_turn_error(
+                        turn=turn,
+                        repo_context=repo_context,
+                        error_message=f"Builder error: {exc}",
+                        reviewer_turn=reviewer_turn,
+                    )
                     break
                 self.latest_report = builder_report or "(Builder produced no summary.)"
                 tool_summary, tool_results = await self._run_builder_tools()
@@ -708,33 +795,33 @@ class ProtocolCoordinator:
                     print("[Supervisor] Auto-committed final changes.", flush=True)
             self.recorder.finalize(final_summary)
 
-    async def _prime_reviewer(self) -> None:
-        briefing = textwrap.dedent(
-            f"""
-            Supervisor Objective: {self.objective}
-            Each response must follow this format:
-            SUMMARY: <2-3 compact sentences referencing git status/diff/tests>
-            PROMPT: <actionable instructions for the Builder or 'APPROVED'>
-            FILES: <optional space/comma separated file paths>
-            CONTEXT: <optional extra notes>
-
-            End every turn with a line containing only {self.reviewer_marker}. If the project is complete, set PROMPT to 'APPROVED' before the marker.
-            """
-        ).strip()
-        await self.reviewer.send(briefing)
-
     async def _run_builder_tools(self) -> Tuple[str, List[ToolResult]]:
         if not self.builder_tools:
             return "No builder tools configured.", []
         results: List[ToolResult] = []
         for command in self.builder_tools:
-            result = await asyncio.to_thread(
+            runner = asyncio.to_thread(
                 run_tool_command,
                 command,
                 repo_path=self.repo_path,
                 timeout=self.builder_tool_timeout,
                 output_lines=self.tool_output_lines,
             )
+            try:
+                # Add a small buffer to allow subprocess shutdown/cleanup.
+                result = await asyncio.wait_for(runner, timeout=self.builder_tool_timeout + 5)
+            except asyncio.TimeoutError:
+                warning = (
+                    f"Supervisor timed out waiting for '{command}' after {self.builder_tool_timeout} seconds."
+                )
+                print(f"[Supervisor] {warning}", flush=True)
+                result = ToolResult(
+                    name=derive_tool_name(command),
+                    command=command,
+                    exit_code=-1,
+                    duration_s=float(self.builder_tool_timeout),
+                    output=warning,
+                )
             results.append(result)
         summary_parts = [
             f"{res.name} (exit {res.exit_code}, {res.duration_s:.1f}s):\n{res.output}"
@@ -780,37 +867,32 @@ class ProtocolCoordinator:
         first_line = prompt.strip().splitlines()[0].strip().upper()
         return first_line.startswith("APPROVED") or first_line.startswith("DONE")
 
-
-async def interactive_loop(builder: AgentSession, reviewer: AgentSession) -> None:
-    print(
-        "\nSupervisor REPL ready. Prefix input with 'b:' or 'r:' (or 'both:'). Use 'quit' or Ctrl+D to exit.\n",
-        flush=True,
-    )
-    loop = asyncio.get_running_loop()
-    while True:
-        try:
-            raw = await loop.run_in_executor(None, sys.stdin.readline)
-        except KeyboardInterrupt:
-            break
-        if not raw:
-            break
-        line = raw.strip()
-        if not line:
-            continue
-        lowered = line.lower()
-        if lowered in {"quit", "exit"}:
-            break
-        target, payload = parse_repl_input(line)
-        if not payload:
-            print("No payload detected; use e.g. 'b: run tests'", flush=True)
-            continue
-        if target == "builder":
-            await builder.send(payload)
-        elif target == "reviewer":
-            await reviewer.send(payload)
-        else:
-            await builder.send(payload)
-            await reviewer.send(payload)
+    def _record_turn_error(
+        self,
+        *,
+        turn: int,
+        repo_context: str,
+        error_message: str,
+        reviewer_turn: Optional[ReviewerTurn],
+    ) -> None:
+        placeholder = reviewer_turn or ReviewerTurn(
+            summary="Reviewer turn failed before completion.",
+            prompt=error_message,
+            files=[],
+            context="",
+        )
+        self.latest_reviewer_summary = placeholder.summary or "(Reviewer summary missing.)"
+        self.latest_report = error_message
+        self.latest_tool_outputs = error_message
+        self.recorder.record_turn(
+            turn=turn,
+            repo_context=repo_context,
+            reviewer_turn=placeholder,
+            builder_report=error_message,
+            tool_results=[],
+            tool_summary=error_message,
+            git_snapshot=None,
+        )
 
 
 def list_sessions(log_dir: pathlib.Path) -> List[pathlib.Path]:
@@ -872,6 +954,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex-cli", default="codex", help="Path to the Codex CLI executable.")
     parser.add_argument("--builder-args", default="", help="Extra args for the builder Codex instance.")
     parser.add_argument("--reviewer-args", default="", help="Extra args for the reviewer Codex instance.")
+    parser.add_argument(
+        "--show-codex-json",
+        action="store_true",
+        help="Print raw JSON events from codex exec (otherwise print concise summaries).",
+    )
     parser.add_argument("--builder-prompt", default=None, help="Inline role prompt for the builder agent.")
     parser.add_argument("--builder-prompt-file", default=None, help="Path to a file containing the builder prompt.")
     parser.add_argument("--reviewer-prompt", default=None, help="Inline role prompt for the reviewer agent.")
@@ -892,12 +979,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--turn-timeout", type=int, default=300, help="Seconds to wait for each agent marker.")
     parser.add_argument("--reviewer-marker", default=DEFAULT_REVIEWER_MARKER, help="Reviewer turn completion marker.")
     parser.add_argument("--builder-marker", default=DEFAULT_BUILDER_MARKER, help="Builder turn completion marker.")
-    parser.add_argument(
-        "--max-agent-output-lines",
-        type=int,
-        default=400,
-        help="Maximum number of stdout lines to capture per agent turn.",
-    )
     parser.add_argument(
         "--context-status-lines",
         type=int,
@@ -947,13 +1028,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Disable git status/diff snapshots per turn.",
     )
-    parser.add_argument(
-        "--no-script-wrapper",
-        action="store_false",
-        dest="use_script_wrapper",
-        help="Disable the 'script' pseudo-terminal wrapper around Codex CLI processes.",
-    )
-    parser.set_defaults(use_script_wrapper=True)
     parser.add_argument(
         "--auto-commit-each-turn",
         action="store_true",
@@ -1017,67 +1091,67 @@ async def main_async(args: argparse.Namespace) -> None:
     builder_prompt = read_prompt("Builder", args.builder_prompt, args.builder_prompt_file)
     reviewer_prompt = read_prompt("Reviewer", args.reviewer_prompt, args.reviewer_prompt_file)
     if args.auto_protocol:
-        builder_prompt = add_marker_instruction(builder_prompt, args.builder_marker, "Builder")
-        reviewer_prompt = add_marker_instruction(reviewer_prompt, args.reviewer_marker, "Reviewer")
+        builder_prompt = builder_prompt or ""
+        reviewer_prompt = reviewer_prompt or ""
+        builder_prompt = builder_prompt.strip()
+        reviewer_prompt = reviewer_prompt.strip()
+        builder_prompt = builder_prompt + "\n\n" + build_role_prompt("Builder", args.builder_marker)
+        reviewer_prompt = reviewer_prompt + "\n\n" + build_role_prompt("Reviewer", args.reviewer_marker)
 
-    builder = AgentSession(
+    builder = CodexExecAgent(
         name="Builder",
         role_prompt=builder_prompt,
         command=args.codex_cli,
         extra_args=shlex.split(args.builder_args),
         log_dir=log_base,
-        output_line_limit=args.max_agent_output_lines,
-        use_script_wrapper=args.use_script_wrapper,
+        repo_path=repo_path,
+        completion_marker=args.builder_marker,
+        show_json=args.show_codex_json,
     )
-    reviewer = AgentSession(
+    reviewer = CodexExecAgent(
         name="Reviewer",
         role_prompt=reviewer_prompt,
         command=args.codex_cli,
         extra_args=shlex.split(args.reviewer_args),
         log_dir=log_base,
-        output_line_limit=args.max_agent_output_lines,
-        use_script_wrapper=args.use_script_wrapper,
+        repo_path=repo_path,
+        completion_marker=args.reviewer_marker,
+        show_json=args.show_codex_json,
     )
 
-    await asyncio.gather(builder.start(), reviewer.start())
-    try:
-        if args.auto_protocol:
-            session_dir = (
-                resolve_session_path(log_base, args.resume_session)
-                if args.resume_session
-                else None
-            )
-            recorder = SessionRecorder(
-                log_base,
-                session_dir=session_dir,
-                save_git_snapshots=args.save_git_snapshots,
-            )
-            coordinator = ProtocolCoordinator(
-                builder=builder,
-                reviewer=reviewer,
-                objective=args.objective or "",
-                reviewer_marker=args.reviewer_marker,
-                builder_marker=args.builder_marker,
-                max_turns=args.max_turns,
-                turn_timeout=args.turn_timeout,
-                repo_path=repo_path,
-                status_lines=args.context_status_lines,
-                diff_lines=args.context_diff_lines,
-                file_excerpt_lines=args.file_excerpt_lines,
-                builder_tools=args.builder_tool,
-                builder_tool_timeout=args.builder_tool_timeout,
-                tool_output_lines=args.tool_output_lines,
-                recorder=recorder,
-                auto_commit_each_turn=args.auto_commit_each_turn,
-                auto_commit_final=args.auto_commit_final,
-                commit_template=args.commit_template,
-                initial_state=recorder.get_state(),
-            )
-            await coordinator.run()
-        else:
-            await interactive_loop(builder, reviewer)
-    finally:
-        await asyncio.gather(builder.stop(), reviewer.stop())
+    if args.auto_protocol:
+        session_dir = (
+            resolve_session_path(log_base, args.resume_session) if args.resume_session else None
+        )
+        recorder = SessionRecorder(
+            log_base,
+            session_dir=session_dir,
+            save_git_snapshots=args.save_git_snapshots,
+        )
+        coordinator = ProtocolCoordinator(
+            builder=builder,
+            reviewer=reviewer,
+            objective=args.objective or "",
+            reviewer_marker=args.reviewer_marker,
+            builder_marker=args.builder_marker,
+            max_turns=args.max_turns,
+            turn_timeout=args.turn_timeout,
+            repo_path=repo_path,
+            status_lines=args.context_status_lines,
+            diff_lines=args.context_diff_lines,
+            file_excerpt_lines=args.file_excerpt_lines,
+            builder_tools=args.builder_tool,
+            builder_tool_timeout=args.builder_tool_timeout,
+            tool_output_lines=args.tool_output_lines,
+            recorder=recorder,
+            auto_commit_each_turn=args.auto_commit_each_turn,
+            auto_commit_final=args.auto_commit_final,
+            commit_template=args.commit_template,
+            initial_state=recorder.get_state(),
+        )
+        await coordinator.run()
+    else:  # pragma: no cover - guarded by CLI parsing
+        raise RuntimeError("Non protocol mode is not supported in exec-backed supervisor.")
 
 
 def main() -> None:
@@ -1089,6 +1163,8 @@ def main() -> None:
         args = parser.parse_args()
     if args.auto_protocol and not args.objective:
         parser.error("--objective is required when --auto-protocol is enabled.")
+    if not args.auto_protocol:
+        parser.error("Headless supervisor currently requires --auto-protocol.")
     try:
         args.codex_cli = resolve_codex_cli(args.codex_cli)
     except FileNotFoundError as exc:

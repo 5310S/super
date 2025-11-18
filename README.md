@@ -6,7 +6,7 @@ Supervisor orchestrates two Codex CLI agents – a Builder and a Reviewer – so
 - **Structured protocol:** Reviewer must emit `SUMMARY`, `PROMPT`, `FILES`, `CONTEXT` blocks plus the `<<REVIEWER_DONE>>` marker. Builder responses are bounded and marker-terminated to prevent runaway output.
 - **Rich context feeds:** Every reviewer turn includes `git status -sb`, `git diff --stat`, the previous builder report, and summaries of automatic tool runs. Builder prompts can include reviewer-selected file excerpts and extra context text.
 - **Automatic tools & commits:** Configure repeated commands (tests, lint, etc.) with `--builder-tool`. Their output flows back into the next Reviewer/Builder turn. Optional `--auto-commit-each-turn` / `--auto-commit-final` hooks keep the repo up to date once work is reviewed.
-- **Artifact logging & resilience:** Each session writes to `~/.codex-supervisor/logs/session-*/turns.jsonl`, `transcript.md`, optional git snapshots, and an incremental `state.json`. Combined with automatic Codex restarts, pseudo-terminal wrapping, and `--resume-session`, you can list, view, or continue any run without losing context.
+- **Artifact logging & resilience:** Each session writes to `~/.codex-supervisor/logs/session-*/turns.jsonl`, `transcript.md`, optional git snapshots, and an incremental `state.json`. Combined with automatic turn-by-turn `codex exec` launches and `--resume-session`, you can list, view, or continue any run without losing context.
 - **Configurable everything:** Use CLI flags or a YAML/JSON config file to set repo paths, timeouts, context line limits, tool timeouts, commit templates, etc.
 - **Manual REPL fallback:** Skip `--auto-protocol` to drive either agent interactively with `b:` / `r:` prompts.
 
@@ -54,13 +54,11 @@ pip install pyinstaller
 pyinstaller --windowed --name "Codex Supervisor" gui.py
 open dist/Codex\ Supervisor.app
 ```
-Make sure the `Codex CLI path` field points to your installed `codex` binary (defaults to `codex`, so it works if the CLI is on `PATH`).
+Make sure the `Codex CLI path` field points to your installed `codex` binary (defaults to `codex`, so it works if the CLI is on `PATH`).  
+Advanced GUI options let you pass custom builder/reviewer CLI arguments (forwarded to `codex exec`) so you can tweak models, sandbox settings, or approvals per run, and there’s a checkbox to display the raw Codex JSON events if you prefer that over the summarized stream.
 
-### Manual REPL
-```bash
-codex-supervisor --codex-cli codex
-```
-If your Codex binary lives elsewhere, pass `--codex-cli /absolute/path/to/codex` (the GUI autodetects common paths automatically). Turning the TTY wrapper off is as simple as `--no-script-wrapper` if you notice compatibility issues with `script`.
+### Auto Protocol Only
+`codex-supervisor` now launches Codex via `codex exec` for every reviewer/builder turn. Because each invocation is self-contained, interactive REPL mode is no longer supported—always run with `--auto-protocol` (the GUI enables it by default). If your Codex binary lives elsewhere, pass `--codex-cli /absolute/path/to/codex` (the GUI autodetects common paths automatically).
 
 ### Structured Protocol with Config File
 ```yaml
@@ -88,20 +86,22 @@ codex-supervisor \
   --builder-tool "pytest -q" \
   --builder-tool "ruff check" \
   --auto-commit-final \
-  --max-turns 8
+  --max-turns 8 \
+  --show-codex-json
 ```
+Every reviewer/builder turn spawns a fresh `codex exec --json` process, so the workflow no longer depends on the Codex TUI or pseudo-terminal wrappers.
 
 ### Reviewer Format Reminder
 ```
-SUMMARY: <brief recap>
-PROMPT: <instructions or APPROVED>
-FILES: path/to/file.py another/file.ts
+SUMMARY: concise recap referencing git status/diff/tests
+PROMPT: actionable instructions for the Builder or APPROVED
+FILES: path/to/file.py another/file.ts (optional)
 CONTEXT: optional extra details
 <<REVIEWER_DONE>>
 ```
 
 ### Builder Expectations
-Builder should apply the instructions, run any needed repo commands, summarize the work, and finish with `<<BUILDER_DONE>>`. Output is capped with `--max-agent-output-lines` to prevent runaway transcripts.
+Builder should apply the instructions, run any needed repo commands, summarize the work, and finish with `<<BUILDER_DONE>>`.
 
 ## Session Management
 - `--log-dir` now defaults to `~/.codex-supervisor/logs`. Each auto-protocol run creates `session-YYYYmmdd-HHMMSS/` folders there unless you pass a custom path (relative paths resolve against your current working directory).
