@@ -1,3 +1,4 @@
+import io
 import os
 import subprocess
 import tempfile
@@ -10,8 +11,10 @@ from unittest import mock
 
 from supervisor import (
     EXCERPT_MAX_BYTES,
+    DEFAULT_SANDBOX_MODE,
     SessionRecorder,
     ReviewerTurn,
+    CodexExecAgent,
     auto_commit_changes,
     format_commit_message,
     load_file_excerpt,
@@ -273,6 +276,71 @@ class CommitMessageTests(unittest.TestCase):
             final_summary="all done",
         )
         self.assertEqual(final_message, "Final (final): all done")
+
+
+class CodexExecAgentCommandTests(unittest.TestCase):
+    def _run_agent(self, extra_args: list[str]) -> list[str]:
+        sample_output = "\n".join(
+            [
+                '{"type":"thread.started"}',
+                '{"type":"item.completed","item":{"type":"agent_message","text":"Complete"}}',
+                '{"type":"turn.completed"}',
+            ]
+        ) + "\n"
+
+        class DummyProcess:
+            def __init__(self) -> None:
+                self.stdout = io.StringIO(sample_output)
+                self.stderr = io.StringIO("")
+                self.returncode = 0
+
+            def wait(self) -> None:
+                return None
+
+        captured: list[list[str]] = []
+
+        def fake_popen(cmd, *args, **kwargs):  # type: ignore[override]
+            captured.append(cmd)
+            return DummyProcess()
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("supervisor.subprocess.Popen", side_effect=fake_popen):
+            agent = CodexExecAgent(
+                name="Builder",
+                role_prompt="Run",
+                command="codex",
+                extra_args=extra_args,
+                log_dir=Path(tmp),
+                repo_path=Path(tmp),
+                completion_marker="<<DONE>>",
+                show_json=False,
+            )
+            try:
+                result = agent._run_once("payload")
+            finally:
+                agent.log_file.close()
+        self.assertEqual(result, "Complete")
+        self.assertEqual(len(captured), 1)
+        return captured[0]
+
+    def test_sandbox_mode_is_forced_to_danger(self) -> None:
+        cmd = self._run_agent([])
+        self.assertIn("--sandbox", cmd)
+        idx = cmd.index("--sandbox")
+        self.assertEqual(cmd[idx + 1], DEFAULT_SANDBOX_MODE)
+
+    def test_user_supplied_sandbox_flags_are_overridden(self) -> None:
+        cmd = self._run_agent(["--sandbox-mode", "workspace-write", "--flag"])
+        self.assertIn("--flag", cmd)
+        self.assertEqual(cmd.count("--sandbox"), 1)
+        idx = cmd.index("--sandbox")
+        self.assertEqual(cmd[idx + 1], DEFAULT_SANDBOX_MODE)
+        self.assertNotIn("workspace-write", cmd)
+
+        cmd_inline = self._run_agent(["--sandbox=workspace-write"])
+        self.assertEqual(cmd_inline.count("--sandbox"), 1)
+        idx_inline = cmd_inline.index("--sandbox")
+        self.assertEqual(cmd_inline[idx_inline + 1], DEFAULT_SANDBOX_MODE)
+        self.assertNotIn("--sandbox=workspace-write", cmd_inline)
 
 
 if __name__ == "__main__":

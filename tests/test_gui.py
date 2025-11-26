@@ -84,6 +84,10 @@ class SupervisorGUIUnitTests(unittest.TestCase):
         self.obj._restart_reason = ""
         self.obj.last_command = None
         self.obj.process = None
+        self.obj.prevent_screen_sleep_var = DummyBooleanVar(False)
+        self.obj.prevent_computer_sleep_var = DummyBooleanVar(False)
+        self.obj._sleep_process = None
+        self.obj._sleep_warning_shown = False
 
     def test_save_and_load_settings_round_trip(self) -> None:
         vars_map = {
@@ -155,6 +159,37 @@ class SupervisorGUIUnitTests(unittest.TestCase):
                 "[Reviewer] Turn completed | context left: 100 tokens (~40.0%)"
             )
             stop.assert_not_called()
+
+    def test_sleep_prevention_mac_uses_caffeinate(self) -> None:
+        self.obj.process = object()
+        self.obj.prevent_screen_sleep_var = DummyBooleanVar(True)
+        self.obj.prevent_computer_sleep_var = DummyBooleanVar(True)
+        fake_proc = mock.Mock()
+        fake_proc.wait.return_value = None
+        original_platform = gui.sys.platform
+        with mock.patch.object(gui.subprocess, "Popen", return_value=fake_proc) as popen:
+            gui.sys.platform = "darwin"
+            try:
+                self.obj._start_sleep_prevention()
+            finally:
+                gui.sys.platform = original_platform
+        popen.assert_called_once_with(["caffeinate", "-d", "-i"])
+        self.assertIs(self.obj._sleep_process, fake_proc)
+        self.obj._stop_sleep_prevention()
+        fake_proc.terminate.assert_called_once()
+
+    def test_sleep_prevention_noop_off_macos(self) -> None:
+        self.obj.process = object()
+        self.obj.prevent_screen_sleep_var = DummyBooleanVar(True)
+        original_platform = gui.sys.platform
+        with mock.patch.object(gui.subprocess, "Popen") as popen:
+            gui.sys.platform = "linux"
+            try:
+                self.obj._start_sleep_prevention()
+            finally:
+                gui.sys.platform = original_platform
+        popen.assert_not_called()
+        self.assertIsNone(self.obj._sleep_process)
 
 
 if __name__ == "__main__":

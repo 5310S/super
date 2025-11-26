@@ -37,6 +37,7 @@ DEFAULT_REVIEWER_PROMPT = (
 DEFAULT_REVIEWER_MARKER = "<<REVIEWER_DONE>>"
 DEFAULT_BUILDER_MARKER = "<<BUILDER_DONE>>"
 DEFAULT_COMMIT_TEMPLATE = "Supervisor turn {turn}: {summary}"
+DEFAULT_SANDBOX_MODE = "danger-full-access"
 EXCERPT_MAX_BYTES = 200_000  # cap size of reviewer-requested excerpts (~200 KB)
 BINARY_SNIFF_BYTES = 2048
 
@@ -347,6 +348,7 @@ class CodexExecAgent:
         repo_path: pathlib.Path,
         completion_marker: str,
         show_json: bool,
+        sandbox_mode: Optional[str] = DEFAULT_SANDBOX_MODE,
     ) -> None:
         self.name = name
         self.role_prompt = role_prompt.strip()
@@ -355,6 +357,7 @@ class CodexExecAgent:
         self.repo_path = repo_path
         self.completion_marker = completion_marker
         self.show_json = show_json
+        self.sandbox_mode = sandbox_mode
         log_dir.mkdir(parents=True, exist_ok=True)
         self.log_file = (log_dir / f"{name.lower()}_exec.log").open("a", encoding="utf-8")
 
@@ -369,7 +372,7 @@ class CodexExecAgent:
             "--json",
             "--color",
             "never",
-            *self.extra_args,
+            *self._prepare_extra_args(),
             prompt,
         ]
         self._log(
@@ -438,6 +441,25 @@ class CodexExecAgent:
     def _warn(self, message: str) -> None:
         self._log("WARN", message)
         print(f"[{self.name}][WARN] {message}", file=sys.stderr, flush=True)
+
+    def _prepare_extra_args(self) -> List[str]:
+        extra = list(self.extra_args)
+        if not self.sandbox_mode:
+            return extra
+        sanitized: List[str] = []
+        skip_next = False
+        for token in extra:
+            if skip_next:
+                skip_next = False
+                continue
+            if token == "--sandbox" or token == "--sandbox-mode":
+                skip_next = True
+                continue
+            if token.startswith("--sandbox=") or token.startswith("--sandbox-mode="):
+                continue
+            sanitized.append(token)
+        sanitized.extend(["--sandbox", self.sandbox_mode])
+        return sanitized
 
 
 def read_prompt(name: str, inline: Optional[str], path: Optional[str]) -> str:

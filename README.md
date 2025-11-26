@@ -5,6 +5,7 @@ Supervisor orchestrates two Codex CLI agents – a Builder and a Reviewer – so
 ## Highlights
 - **Structured protocol:** Reviewer must emit `SUMMARY`, `PROMPT`, `FILES`, `CONTEXT` blocks plus the `<<REVIEWER_DONE>>` marker. Builder responses are bounded and marker-terminated to prevent runaway output.
 - **Rich context feeds:** Every reviewer turn includes `git status -sb`, `git diff --stat`, the previous builder report, and summaries of automatic tool runs. Builder prompts can include reviewer-selected file excerpts and extra context text.
+- **Full-access sandbox:** Builder and Reviewer codex exec runs always include `--sandbox danger-full-access`, so sessions start with writable repos without extra manual approvals.
 - **Automatic tools & commits:** Configure repeated commands (tests, lint, etc.) with `--builder-tool`. Their output flows back into the next Reviewer/Builder turn. Optional `--auto-commit-each-turn` / `--auto-commit-final` hooks keep the repo up to date once work is reviewed.
 - **Artifact logging & resilience:** Each session writes to `~/.codex-supervisor/logs/session-*/turns.jsonl`, `transcript.md`, optional git snapshots, and an incremental `state.json`. Combined with automatic turn-by-turn `codex exec` launches and `--resume-session`, you can list, view, or continue any run without losing context.
 - **Configurable everything:** Use CLI flags or a YAML/JSON config file to set repo paths, timeouts, context line limits, tool timeouts, commit templates, etc.
