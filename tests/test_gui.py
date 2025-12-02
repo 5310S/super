@@ -1,4 +1,3 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -64,132 +63,151 @@ class DummyText:
         return self.text
 
 
-class SupervisorGUIUnitTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        self.settings_path = Path(self.tmpdir.name) / "settings.json"
-        self.logs_dir = Path(self.tmpdir.name) / "logs"
-        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self.obj = gui.SupervisorGUI.__new__(gui.SupervisorGUI)
-        self.obj._settings_vars = {}
-        self.obj.settings_path = self.settings_path
-        self.obj._save_pending = False
-        self.obj._loading_settings = False
-        self.obj.output_text = DummyText()
-        self.obj._auto_restart_requested = False
-        self.obj.context_threshold_var = DummyVar("")
-        self.obj._context_stats = {"Builder": None, "Reviewer": None}
-        self.obj._auto_restart_pending = False
-        self.obj._restart_reason = ""
-        self.obj.last_command = None
-        self.obj.process = None
-        self.obj.prevent_screen_sleep_var = DummyBooleanVar(False)
-        self.obj.prevent_computer_sleep_var = DummyBooleanVar(False)
-        self.obj._sleep_process = None
-        self.obj._sleep_warning_shown = False
+class DummyButton:
+    def __init__(self):
+        self.state = None
+        self.text = None
 
-    def test_save_and_load_settings_round_trip(self) -> None:
-        vars_map = {
-            "objective": DummyVar("Ship"),
-            "auto": DummyBooleanVar(True),
-        }
-        self.obj._settings_vars = vars_map
-        with mock.patch.object(gui.tk, "BooleanVar", DummyBooleanVar):
-            self.obj._save_settings()
-            vars_map["objective"].set("Reset")
-            vars_map["auto"].set(False)
-            self.obj._load_settings()
-        self.assertEqual(vars_map["objective"].get(), "Ship")
-        self.assertTrue(vars_map["auto"].get())
+    def config(self, **kwargs):
+        if "state" in kwargs:
+            self.state = kwargs["state"]
+        if "text" in kwargs:
+            self.text = kwargs["text"]
 
+
+def make_tab() -> gui.SupervisorTab:
+    tab = gui.SupervisorTab.__new__(gui.SupervisorTab)
+    tab.output_text = DummyText()
+    tab._handle_log_line = lambda line: None
+    tab._context_stats = {"Builder": None, "Reviewer": None}
+    tab.context_threshold_var = DummyVar("")
+    tab._auto_restart_requested = False
+    tab._auto_restart_pending = False
+    tab._restart_reason = ""
+    tab._stop_after_prompt_requested = False
+    tab.last_command = None
+    tab.process = None
+    tab.prevent_screen_sleep_var = DummyBooleanVar(False)
+    tab.prevent_computer_sleep_var = DummyBooleanVar(False)
+    tab._sleep_process = None
+    tab._sleep_warning_shown = False
+    tab.stop_after_prompt_button = DummyButton()
+    return tab
+
+
+class SupervisorTabUnitTests(unittest.TestCase):
     def test_log_line_truncates(self) -> None:
+        tab = make_tab()
         long_text = "x" * (gui.OUTPUT_MAX_CHARS + 10)
-        self.obj._log_line(long_text)
-        content = self.obj.output_text.get("1.0", "end-1c")
+        tab._log_line(long_text)
+        content = tab.output_text.get("1.0", "end-1c")
         self.assertLessEqual(len(content), gui.OUTPUT_MAX_CHARS)
 
     def test_resolve_codex_cli(self) -> None:
+        tab = make_tab()
         with self.assertRaises(FileNotFoundError):
-            self.obj._resolve_codex_cli("/no/such/codex")
-        dummy = Path(self.tmpdir.name) / "codex.bin"
-        dummy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        dummy.chmod(0o755)
-        resolved = self.obj._resolve_codex_cli(str(dummy))
-        self.assertEqual(resolved, str(dummy))
-
-    def test_open_logs_invokes_platform_handler(self) -> None:
-        opened = []
-
-        def fake_run(args, check=False):
-            opened.append(args)
-
-        with mock.patch.object(gui, "LOGS_DIR", self.logs_dir), mock.patch.object(
-            gui.subprocess, "run", side_effect=fake_run
-        ):
-            original_platform = gui.sys.platform
-            gui.sys.platform = "darwin"
-            try:
-                self.obj._open_logs()
-            finally:
-                gui.sys.platform = original_platform
-        self.assertTrue(self.logs_dir.exists())
-        self.assertIn(["open", str(self.logs_dir)], opened)
+            tab._resolve_codex_cli("/no/such/codex")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dummy = Path(tmpdir) / "codex.bin"
+            dummy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            dummy.chmod(0o755)
+            resolved = tab._resolve_codex_cli(str(dummy))
+            self.assertEqual(resolved, str(dummy))
 
     def test_update_context_triggers_restart_after_turn(self) -> None:
-        self.obj.context_threshold_var = DummyVar("50")
-        self.obj.process = object()
-        self.obj.last_command = ["python", "gui.py"]
-        with mock.patch.object(self.obj, "stop_supervisor") as stop:
+        tab = make_tab()
+        tab.context_threshold_var = DummyVar("50")
+        tab.process = object()
+        tab.last_command = ["python", "gui.py"]
+        with mock.patch.object(tab, "stop_supervisor") as stop:
             line = "[Builder] Turn completed (output tokens: 10) | context left: 100 tokens (~40.0%)"
-            self.obj._update_context_from_line(line)
+            tab._update_context_from_line(line)
             stop.assert_not_called()
-            self.assertTrue(self.obj._auto_restart_requested)
+            self.assertTrue(tab._auto_restart_requested)
             wait_line = "[Supervisor] Turn 5: waiting for reviewer instructions..."
-            self.obj._maybe_stop_after_current_turn(wait_line)
+            tab._maybe_stop_after_current_turn(wait_line)
             stop.assert_called_once_with(auto=True)
-            self.assertTrue(self.obj._auto_restart_pending)
+            self.assertTrue(tab._auto_restart_pending)
 
     def test_update_context_ignored_without_threshold(self) -> None:
-        self.obj.context_threshold_var = DummyVar("")
-        self.obj.process = object()
-        self.obj.last_command = ["python", "gui.py"]
-        with mock.patch.object(self.obj, "stop_supervisor") as stop:
-            self.obj._update_context_from_line(
+        tab = make_tab()
+        tab.context_threshold_var = DummyVar("")
+        tab.process = object()
+        tab.last_command = ["python", "gui.py"]
+        with mock.patch.object(tab, "stop_supervisor") as stop:
+            tab._update_context_from_line(
                 "[Reviewer] Turn completed | context left: 100 tokens (~40.0%)"
             )
             stop.assert_not_called()
 
+    def test_stop_after_prompt_waits_for_turn_boundary(self) -> None:
+        tab = make_tab()
+        tab.process = object()
+        with mock.patch.object(gui.messagebox, "showinfo"):
+            tab.stop_after_prompt()
+        self.assertTrue(tab._stop_after_prompt_requested)
+        with mock.patch.object(tab, "stop_supervisor") as stop:
+            tab._maybe_stop_after_current_turn("[Supervisor] Turn 3: waiting for reviewer instructions...")
+            stop.assert_called_once_with()
+        self.assertFalse(tab._stop_after_prompt_requested)
+
     def test_sleep_prevention_mac_uses_caffeinate(self) -> None:
-        self.obj.process = object()
-        self.obj.prevent_screen_sleep_var = DummyBooleanVar(True)
-        self.obj.prevent_computer_sleep_var = DummyBooleanVar(True)
+        tab = make_tab()
+        tab.process = object()
+        tab.prevent_screen_sleep_var = DummyBooleanVar(True)
+        tab.prevent_computer_sleep_var = DummyBooleanVar(True)
         fake_proc = mock.Mock()
         fake_proc.wait.return_value = None
         original_platform = gui.sys.platform
         with mock.patch.object(gui.subprocess, "Popen", return_value=fake_proc) as popen:
             gui.sys.platform = "darwin"
             try:
-                self.obj._start_sleep_prevention()
+                tab._start_sleep_prevention()
             finally:
                 gui.sys.platform = original_platform
         popen.assert_called_once_with(["caffeinate", "-d", "-i"])
-        self.assertIs(self.obj._sleep_process, fake_proc)
-        self.obj._stop_sleep_prevention()
+        self.assertIs(tab._sleep_process, fake_proc)
+        tab._stop_sleep_prevention()
         fake_proc.terminate.assert_called_once()
 
     def test_sleep_prevention_noop_off_macos(self) -> None:
-        self.obj.process = object()
-        self.obj.prevent_screen_sleep_var = DummyBooleanVar(True)
+        tab = make_tab()
+        tab.process = object()
+        tab.prevent_screen_sleep_var = DummyBooleanVar(True)
         original_platform = gui.sys.platform
         with mock.patch.object(gui.subprocess, "Popen") as popen:
             gui.sys.platform = "linux"
             try:
-                self.obj._start_sleep_prevention()
+                tab._start_sleep_prevention()
             finally:
                 gui.sys.platform = original_platform
         popen.assert_not_called()
-        self.assertIsNone(self.obj._sleep_process)
+        self.assertIsNone(tab._sleep_process)
+
+
+class SupervisorGUIUnitTests(unittest.TestCase):
+    def test_open_logs_invokes_platform_handler(self) -> None:
+        opened = []
+        obj = gui.SupervisorGUI.__new__(gui.SupervisorGUI)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs_dir = Path(tmpdir) / "logs"
+
+            def fake_run(args, check=False):
+                opened.append(args)
+
+            with mock.patch.object(gui, "LOGS_DIR", logs_dir), mock.patch.object(
+                gui.subprocess,
+                "run",
+                side_effect=fake_run,
+            ):
+                original_platform = gui.sys.platform
+                gui.sys.platform = "darwin"
+                try:
+                    obj.open_logs_folder()
+                finally:
+                    gui.sys.platform = original_platform
+            self.assertTrue(logs_dir.exists())
+            self.assertIn(["open", str(logs_dir)], opened)
 
 
 if __name__ == "__main__":

@@ -86,6 +86,7 @@ class SupervisorTab(tk.Frame):
         self._auto_restart_requested = False
         self._auto_restart_pending = False
         self._restart_reason = ""
+        self._stop_after_prompt_requested = False
         self.last_command: list[str] | None = None
         self._sleep_process: subprocess.Popen | None = None
         self._sleep_warning_shown = False
@@ -215,6 +216,13 @@ class SupervisorTab(tk.Frame):
         self.start_button.pack(side=tk.LEFT)
         self.stop_button = tk.Button(controls, text="Stop", command=self.stop_supervisor, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5)
+        self.stop_after_prompt_button = tk.Button(
+            controls,
+            text="Stop After Prompt",
+            command=self.stop_after_prompt,
+            state=tk.DISABLED,
+        )
+        self.stop_after_prompt_button.pack(side=tk.LEFT, padx=5)
         tk.Button(controls, text="Open Logs Folder", command=self.controller.open_logs_folder).pack(side=tk.LEFT, padx=5)
 
         timer_frame = tk.Frame(controls)
@@ -286,7 +294,21 @@ class SupervisorTab(tk.Frame):
             return
         self._auto_restart_pending = False
         self._restart_reason = ""
+        self._stop_after_prompt_requested = False
         self._launch_supervisor(cmd, remember=True)
+
+    def stop_after_prompt(self) -> None:
+        if not self.process:
+            messagebox.showinfo(APP_TITLE, "No supervisor is running in this tab.")
+            return
+        if self._stop_after_prompt_requested:
+            messagebox.showinfo(APP_TITLE, "A graceful stop is already scheduled for this tab.")
+            return
+        self._stop_after_prompt_requested = True
+        self._auto_restart_requested = False
+        self._auto_restart_pending = False
+        self._restart_reason = ""
+        self._log_line("\nWill stop after the current prompt finishes...\n")
 
     def _build_command(self) -> list[str] | None:
         cmd = [sys.executable, CLI_SENTINEL]
@@ -343,6 +365,7 @@ class SupervisorTab(tk.Frame):
 
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
+        self.stop_after_prompt_button.config(state=tk.NORMAL, text="Stop After Prompt")
         if self.process.stdout:
             threading.Thread(target=self._reader_thread, args=(self.process.stdout, "STDOUT"), daemon=True).start()
         if self.process.stderr:
@@ -352,6 +375,8 @@ class SupervisorTab(tk.Frame):
         self._start_timer()
 
     def stop_supervisor(self, *, auto: bool = False) -> None:
+        self.stop_after_prompt_button.config(state=tk.DISABLED, text="Stop After Prompt")
+        self._stop_after_prompt_requested = False
         if not self.process:
             self._stop_sleep_prevention()
             return
@@ -513,13 +538,16 @@ class SupervisorTab(tk.Frame):
         self._log_line(f"\nAuto restart scheduled after current turn: {self._restart_reason}\n")
 
     def _maybe_stop_after_current_turn(self, line: str) -> None:
-        if (
-            not self._auto_restart_requested
-            or not self.process
-            or not self.last_command
-        ):
+        if not self.process:
             return
-        if TURN_WAIT_RE.search(line):
+        if not TURN_WAIT_RE.search(line):
+            return
+        if self._stop_after_prompt_requested:
+            self._stop_after_prompt_requested = False
+            self._log_line("\nCurrent prompt finished; stopping this tab as requested...\n")
+            self.stop_supervisor()
+            return
+        if self._auto_restart_requested and self.last_command:
             self._auto_restart_requested = False
             self._auto_restart_pending = True
             self.stop_supervisor(auto=True)
@@ -568,6 +596,8 @@ class SupervisorTab(tk.Frame):
             self._stop_timer()
             self.start_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
+            self.stop_after_prompt_button.config(state=tk.DISABLED, text="Stop After Prompt")
+            self._stop_after_prompt_requested = False
             if self._auto_restart_requested and self.last_command:
                 self._auto_restart_pending = True
                 self._auto_restart_requested = False
