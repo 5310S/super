@@ -16,6 +16,7 @@ from supervisor import (
     ReviewerTurn,
     CodexExecAgent,
     auto_commit_changes,
+    auto_push_changes,
     format_commit_message,
     load_file_excerpt,
     parse_codex_exec_output,
@@ -222,13 +223,34 @@ class SessionRecorderResilienceTests(unittest.TestCase):
 class AutoCommitTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.repo = Path(self.tmpdir.name)
+        base = Path(self.tmpdir.name)
+        self.repo = base / "work"
+        self.repo.mkdir()
+        self.remote_dir = base / "remote.git"
+        subprocess.run(["git", "init", "--bare", str(self.remote_dir)], check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "init"], cwd=self.repo, check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.repo, check=True)
         (self.repo / "tracked.txt").write_text("original\n", encoding="utf-8")
         subprocess.run(["git", "add", "tracked.txt"], cwd=self.repo, check=True)
         subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["git", "remote", "add", "origin", str(self.remote_dir)], cwd=self.repo, check=True)
+        self.branch = (
+            subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self.repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            or "main"
+        )
+        subprocess.run(
+            ["git", "push", "-u", "origin", self.branch],
+            cwd=self.repo,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
@@ -257,6 +279,20 @@ class AutoCommitTests(unittest.TestCase):
     def test_auto_commit_changes_noop_when_clean(self) -> None:
         committed = auto_commit_changes(self.repo, "should not commit")
         self.assertFalse(committed)
+
+    def test_auto_push_changes_pushes_to_remote(self) -> None:
+        (self.repo / "tracked.txt").write_text("push me\n", encoding="utf-8")
+        committed = auto_commit_changes(self.repo, "ready to push")
+        self.assertTrue(committed)
+        pushed = auto_push_changes(self.repo)
+        self.assertTrue(pushed)
+        remote_log = subprocess.run(
+            ["git", "--git-dir", str(self.remote_dir), "log", "-1", "--pretty=%B", self.branch],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(remote_log, "ready to push")
 
 
 class CommitMessageTests(unittest.TestCase):

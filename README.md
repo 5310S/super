@@ -1,12 +1,12 @@
 # Supervisor
 
-Supervisor orchestrates two Codex CLI agents – a Builder and a Reviewer – so they can collaborate on the same repository. The Reviewer inspects repo state, writes structured prompts, and the Builder executes edits/tests. A strict protocol keeps turns synchronized, injects repo context, persists everything for auditing, and can even auto-commit when the Reviewer approves.
+Supervisor orchestrates two Codex CLI agents – a Builder and a Reviewer – so they can collaborate on the same repository. The Reviewer inspects repo state, writes structured prompts, and the Builder executes edits/tests. A strict protocol keeps turns synchronized, injects repo context, persists everything for auditing, and can even auto-commit (and optionally push) when the Reviewer approves.
 
 ## Highlights
 - **Structured protocol:** Reviewer must emit `SUMMARY`, `PROMPT`, `FILES`, `CONTEXT` blocks plus the `<<REVIEWER_DONE>>` marker. Builder responses are bounded and marker-terminated to prevent runaway output.
 - **Rich context feeds:** Every reviewer turn includes `git status -sb`, `git diff --stat`, the previous builder report, and summaries of automatic tool runs. Builder prompts can include reviewer-selected file excerpts and extra context text.
 - **Full-access sandbox:** Builder and Reviewer codex exec runs always include `--sandbox danger-full-access`, so sessions start with writable repos without extra manual approvals.
-- **Automatic tools & commits:** Configure repeated commands (tests, lint, etc.) with `--builder-tool`. Their output flows back into the next Reviewer/Builder turn. Optional `--auto-commit-each-turn` / `--auto-commit-final` hooks keep the repo up to date once work is reviewed.
+- **Automatic tools & commits:** Configure repeated commands (tests, lint, etc.) with `--builder-tool`. Their output flows back into the next Reviewer/Builder turn. Optional `--auto-commit-each-turn` / `--auto-commit-final` / `--auto-push-final` hooks keep the repo up to date once work is reviewed.
 - **Artifact logging & resilience:** Each session writes to `~/.codex-supervisor/logs/session-*/turns.jsonl`, `transcript.md`, optional git snapshots, and an incremental `state.json`. Combined with automatic turn-by-turn `codex exec` launches and `--resume-session`, you can list, view, or continue any run without losing context.
 - **Configurable everything:** Use CLI flags or a YAML/JSON config file to set repo paths, timeouts, context line limits, tool timeouts, commit templates, etc.
 - **Manual REPL fallback:** Skip `--auto-protocol` to drive either agent interactively with `b:` / `r:` prompts.
@@ -56,7 +56,7 @@ pyinstaller --windowed --name "Codex Supervisor" gui.py
 open dist/Codex\ Supervisor.app
 ```
 Make sure the `Codex CLI path` field points to your installed `codex` binary (defaults to `codex`, so it works if the CLI is on `PATH`).  
-Advanced GUI options let you pass custom builder/reviewer CLI arguments (forwarded to `codex exec`) so you can tweak models, sandbox settings, or approvals per run, and there’s a checkbox to display the raw Codex JSON events if you prefer that over the summarized stream.
+Advanced GUI options let you pass custom builder/reviewer CLI arguments (forwarded to `codex exec`) so you can tweak models, sandbox settings, or approvals per run, and there’s a checkbox to display the raw Codex JSON events if you prefer that over the summarized stream. A dedicated "Commit + push when reviewer approves" button toggles automatic git commit + push once the reviewer signs off.
 
 ### Auto Protocol Only
 `codex-supervisor` now launches Codex via `codex exec` for every reviewer/builder turn. Because each invocation is self-contained, interactive REPL mode is no longer supported—always run with `--auto-protocol` (the GUI enables it by default). If your Codex binary lives elsewhere, pass `--codex-cli /absolute/path/to/codex` (the GUI autodetects common paths automatically).
@@ -87,6 +87,7 @@ codex-supervisor \
   --builder-tool "pytest -q" \
   --builder-tool "ruff check" \
   --auto-commit-final \
+  --auto-push-final \
   --max-turns 8 \
   --show-codex-json
 ```
@@ -111,11 +112,12 @@ Builder should apply the instructions, run any needed repo commands, summarize t
 - `codex-supervisor --show-session session-20240101-120000` prints the Markdown transcript.
 - `codex-supervisor --auto-protocol ... --resume-session session-...` continues appending to an existing log directory.
 
-## Git Snapshots & Commits
+## Git Snapshots, Commits & Pushes
 - Enable/disable per-turn snapshots with `--save-git-snapshots / --no-save-git-snapshots` (default: enabled). Files land next to the transcript.
-- Auto commits:
+- Auto commits/pushes:
   - `--auto-commit-each-turn` commits after every builder turn.
   - `--auto-commit-final` commits once the reviewer emits `PROMPT: APPROVED`.
+  - `--auto-push-final` pushes your current branch once the reviewer approves (expects an upstream remote). Pair it with `--auto-commit-final` to ship changes automatically.
   - `--commit-template "Supervisor turn {turn}: {summary}"` controls the commit message.
 
 ## Tests

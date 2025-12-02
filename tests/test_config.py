@@ -47,7 +47,7 @@ builder_tool:
     def test_json_config_merging(self) -> None:
         config = self._write(
             "config.json",
-            '{"context_status_lines": 10, "auto_commit_final": true}',
+            '{"context_status_lines": 10, "auto_commit_final": true, "auto_push_final": true}',
         )
         parser = build_arg_parser()
         data = load_config_data(config)
@@ -55,6 +55,7 @@ builder_tool:
         args = parser.parse_args([])
         self.assertEqual(args.context_status_lines, 10)
         self.assertTrue(args.auto_commit_final)
+        self.assertTrue(args.auto_push_final)
 
 
 if __name__ == "__main__":

@@ -103,6 +103,7 @@ class SupervisorTab(tk.Frame):
         self.codex_cli_var = tk.StringVar(value=default_codex_path())
         self.auto_protocol_var = tk.BooleanVar(value=True)
         self.auto_commit_var = tk.BooleanVar(value=True)
+        self.auto_push_var = tk.BooleanVar(value=False)
         self.builder_args_var = tk.StringVar()
         self.reviewer_args_var = tk.StringVar()
         self.show_json_var = tk.BooleanVar(value=False)
@@ -115,6 +116,7 @@ class SupervisorTab(tk.Frame):
         self._register_setting("codex_cli", self.codex_cli_var)
         self._register_setting("auto_protocol", self.auto_protocol_var)
         self._register_setting("auto_commit_final", self.auto_commit_var)
+        self._register_setting("auto_push_final", self.auto_push_var)
         self._register_setting("builder_args", self.builder_args_var)
         self._register_setting("reviewer_args", self.reviewer_args_var)
         self._register_setting("show_json", self.show_json_var)
@@ -162,6 +164,12 @@ class SupervisorTab(tk.Frame):
             text="Auto commit when reviewer approves",
             variable=self.auto_commit_var,
         ).grid(row=4, column=1, sticky="w", pady=(5, 0))
+        self.auto_push_button = tk.Button(
+            config_frame,
+            text="Commit + push when reviewer approves: Off",
+            command=self._toggle_auto_push,
+        )
+        self.auto_push_button.grid(row=4, column=2, sticky="w", pady=(5, 0), padx=5)
 
         tk.Label(config_frame, text="Builder extra args:").grid(row=5, column=0, sticky="w")
         tk.Entry(config_frame, textvariable=self.builder_args_var, width=60).grid(
@@ -208,6 +216,8 @@ class SupervisorTab(tk.Frame):
         ).grid(row=10, column=0, columnspan=2, sticky="w")
 
         config_frame.columnconfigure(1, weight=1)
+        self.auto_push_var.trace_add("write", lambda *_: self._refresh_auto_push_button())
+        self._refresh_auto_push_button()
 
         controls = tk.Frame(self)
         controls.pack(fill=tk.X, padx=10, pady=(0, 10))
@@ -218,7 +228,7 @@ class SupervisorTab(tk.Frame):
         self.stop_button.pack(side=tk.LEFT, padx=5)
         self.stop_after_prompt_button = tk.Button(
             controls,
-            text="Stop After Prompt",
+            text=self._default_graceful_label(),
             command=self.stop_after_prompt,
             state=tk.DISABLED,
         )
@@ -237,6 +247,23 @@ class SupervisorTab(tk.Frame):
         scrollbar = tk.Scrollbar(output_frame, command=self.output_text.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.output_text["yscrollcommand"] = scrollbar.set
+        self._reset_graceful_stop_state()
+
+    def _toggle_auto_push(self) -> None:
+        new_value = not bool(self.auto_push_var.get())
+        self.auto_push_var.set(new_value)
+        if new_value and not self.auto_commit_var.get():
+            self.auto_commit_var.set(True)
+
+    def _refresh_auto_push_button(self) -> None:
+        state = "On" if self.auto_push_var.get() else "Off"
+        self.auto_push_button.config(text=f"Commit + push when reviewer approves: {state}")
+
+    def _graceful_shortcut_hint(self) -> str:
+        return "Cmd+G" if sys.platform == "darwin" else "Ctrl+G"
+
+    def _default_graceful_label(self) -> str:
+        return f"Stop Gracefully ({self._graceful_shortcut_hint()})"
 
     def _register_setting(self, key: str, var: tk.Variable) -> None:
         self._settings_vars[key] = var
@@ -294,7 +321,7 @@ class SupervisorTab(tk.Frame):
             return
         self._auto_restart_pending = False
         self._restart_reason = ""
-        self._stop_after_prompt_requested = False
+        self._reset_graceful_stop_state()
         self._launch_supervisor(cmd, remember=True)
 
     def stop_after_prompt(self) -> None:
@@ -309,6 +336,7 @@ class SupervisorTab(tk.Frame):
         self._auto_restart_pending = False
         self._restart_reason = ""
         self._log_line("\nWill stop after the current prompt finishes...\n")
+        self.stop_after_prompt_button.config(text="Graceful stop scheduled")
 
     def _build_command(self) -> list[str] | None:
         cmd = [sys.executable, CLI_SENTINEL]
@@ -326,8 +354,11 @@ class SupervisorTab(tk.Frame):
             cmd.extend(["--repo-path", repo_path])
         if self.auto_protocol_var.get():
             cmd.append("--auto-protocol")
-        if self.auto_commit_var.get():
+        auto_push_on_approval = self.auto_push_var.get()
+        if self.auto_commit_var.get() or auto_push_on_approval:
             cmd.append("--auto-commit-final")
+        if auto_push_on_approval:
+            cmd.append("--auto-push-final")
         try:
             cli_value = self._resolve_codex_cli(self.codex_cli_var.get())
         except (FileNotFoundError, PermissionError) as exc:
@@ -365,7 +396,7 @@ class SupervisorTab(tk.Frame):
 
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
-        self.stop_after_prompt_button.config(state=tk.NORMAL, text="Stop After Prompt")
+        self.stop_after_prompt_button.config(state=tk.NORMAL, text=self._default_graceful_label())
         if self.process.stdout:
             threading.Thread(target=self._reader_thread, args=(self.process.stdout, "STDOUT"), daemon=True).start()
         if self.process.stderr:
@@ -375,7 +406,7 @@ class SupervisorTab(tk.Frame):
         self._start_timer()
 
     def stop_supervisor(self, *, auto: bool = False) -> None:
-        self.stop_after_prompt_button.config(state=tk.DISABLED, text="Stop After Prompt")
+        self.stop_after_prompt_button.config(state=tk.DISABLED, text=self._default_graceful_label())
         self._stop_after_prompt_requested = False
         if not self.process:
             self._stop_sleep_prevention()
@@ -543,7 +574,7 @@ class SupervisorTab(tk.Frame):
         if not TURN_WAIT_RE.search(line):
             return
         if self._stop_after_prompt_requested:
-            self._stop_after_prompt_requested = False
+            self._reset_graceful_stop_state()
             self._log_line("\nCurrent prompt finished; stopping this tab as requested...\n")
             self.stop_supervisor()
             return
@@ -596,8 +627,8 @@ class SupervisorTab(tk.Frame):
             self._stop_timer()
             self.start_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
-            self.stop_after_prompt_button.config(state=tk.DISABLED, text="Stop After Prompt")
-            self._stop_after_prompt_requested = False
+            self.stop_after_prompt_button.config(state=tk.DISABLED, text=self._default_graceful_label())
+            self._reset_graceful_stop_state()
             if self._auto_restart_requested and self.last_command:
                 self._auto_restart_pending = True
                 self._auto_restart_requested = False
@@ -636,6 +667,13 @@ class SupervisorTab(tk.Frame):
         self._stop_timer()
         self._stop_sleep_prevention()
 
+    def _reset_graceful_stop_state(self) -> None:
+        self._stop_after_prompt_requested = False
+        try:
+            self.stop_after_prompt_button.config(text=self._default_graceful_label())
+        except tk.TclError:
+            pass
+
 
 class SupervisorGUI(tk.Tk):
     def __init__(self) -> None:
@@ -652,6 +690,7 @@ class SupervisorGUI(tk.Tk):
         self._attention_states: dict[str, dict[str, Any]] = {}
         self._build_widgets()
         self._load_settings()
+        self._bind_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_widgets(self) -> None:
@@ -666,6 +705,16 @@ class SupervisorGUI(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _bind_shortcuts(self) -> None:
+        modifier = "Command" if sys.platform == "darwin" else "Control"
+        self.bind_all(f"<{modifier}-g>", self._stop_gracefully_shortcut)
+
+    def _stop_gracefully_shortcut(self, event: tk.Event | None = None) -> str:
+        tab = self._current_tab()
+        if tab:
+            tab.stop_after_prompt()
+        return "break"
 
     # ------------------------------------------------------------------
     # Tab management

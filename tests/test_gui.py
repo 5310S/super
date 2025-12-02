@@ -89,6 +89,8 @@ def make_tab() -> gui.SupervisorTab:
     tab.process = None
     tab.prevent_screen_sleep_var = DummyBooleanVar(False)
     tab.prevent_computer_sleep_var = DummyBooleanVar(False)
+    tab.auto_push_var = DummyBooleanVar(False)
+    tab.auto_push_button = DummyButton()
     tab._sleep_process = None
     tab._sleep_warning_shown = False
     tab.stop_after_prompt_button = DummyButton()

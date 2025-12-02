@@ -2,6 +2,7 @@ import json
 import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from supervisor import ProtocolCoordinator, SessionRecorder, build_reviewer_briefing
 
@@ -60,6 +61,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 recorder=recorder,
                 auto_commit_each_turn=False,
                 auto_commit_final=False,
+                auto_push_final=False,
                 commit_template="Supervisor turn {turn}",
                 initial_state=None,
             )
@@ -102,6 +104,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 recorder=recorder_resume,
                 auto_commit_each_turn=False,
                 auto_commit_final=False,
+                auto_push_final=False,
                 commit_template="Supervisor turn {turn}",
                 initial_state=recorder_resume.get_state(),
             )
@@ -138,6 +141,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 recorder=recorder,
                 auto_commit_each_turn=False,
                 auto_commit_final=False,
+                auto_push_final=False,
                 commit_template="Supervisor turn {turn}",
                 initial_state=None,
             )
@@ -176,6 +180,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 recorder=recorder,
                 auto_commit_each_turn=False,
                 auto_commit_final=False,
+                auto_push_final=False,
                 commit_template="Supervisor turn {turn}",
                 initial_state=None,
             )
@@ -185,6 +190,39 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             assert state
             self.assertEqual(state.last_turn, 1)
             self.assertIn("Reviewer turn failed", state.latest_reviewer_summary)
+
+    async def test_auto_push_runs_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            log_dir = repo_dir / "logs"
+            reviewer = StubAgent(["SUMMARY: Good\nPROMPT: APPROVED"])
+            builder = StubAgent([])
+            recorder = SessionRecorder(log_dir, save_git_snapshots=False)
+            with mock.patch("supervisor.auto_push_changes", return_value=True) as push:
+                coordinator = ProtocolCoordinator(
+                    builder=builder,
+                    reviewer=reviewer,
+                    objective="Push on approval",
+                    reviewer_marker="<<R>>",
+                    builder_marker="<<B>>",
+                    max_turns=1,
+                    turn_timeout=5,
+                    repo_path=repo_dir,
+                    status_lines=5,
+                    diff_lines=5,
+                    file_excerpt_lines=5,
+                    builder_tools=[],
+                    builder_tool_timeout=5,
+                    tool_output_lines=20,
+                    recorder=recorder,
+                    auto_commit_each_turn=False,
+                    auto_commit_final=False,
+                    auto_push_final=True,
+                    commit_template="Supervisor turn {turn}",
+                    initial_state=None,
+                )
+                await coordinator.run()
+            push.assert_called_once_with(repo_dir.resolve())
 
 
 class ReviewerBriefingTests(unittest.TestCase):

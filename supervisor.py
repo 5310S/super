@@ -659,6 +659,25 @@ def auto_commit_changes(repo_path: pathlib.Path, message: str) -> bool:
         return False
 
 
+def auto_push_changes(repo_path: pathlib.Path) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "push"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return False
+    if completed.returncode == 0:
+        return True
+    details = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part)
+    if details:
+        trimmed = truncate_lines(details, 40)
+        print(f"[Supervisor] Auto-push failed:\n{trimmed}", flush=True)
+    return False
+
+
 def format_commit_message(template: str, *, turn: Optional[int], summary: str, final_summary: str) -> str:
     context = {
         "turn": "final" if turn is None else turn,
@@ -691,6 +710,7 @@ class ProtocolCoordinator:
         recorder: SessionRecorder,
         auto_commit_each_turn: bool,
         auto_commit_final: bool,
+        auto_push_final: bool,
         commit_template: str,
         initial_state: Optional[SessionState] = None,
     ) -> None:
@@ -711,6 +731,7 @@ class ProtocolCoordinator:
         self.recorder = recorder
         self.auto_commit_each_turn = auto_commit_each_turn
         self.auto_commit_final = auto_commit_final
+        self.auto_push_final = auto_push_final
         self.commit_template = commit_template
         self.initial_state = initial_state
         self.start_turn = (initial_state.last_turn + 1) if initial_state else 1
@@ -815,6 +836,10 @@ class ProtocolCoordinator:
                 committed = auto_commit_changes(self.repo_path, msg)
                 if committed:
                     print("[Supervisor] Auto-committed final changes.", flush=True)
+            if self.auto_push_final:
+                pushed = auto_push_changes(self.repo_path)
+                if pushed:
+                    print("[Supervisor] Auto-pushed final changes.", flush=True)
             self.recorder.finalize(final_summary)
 
     async def _run_builder_tools(self) -> Tuple[str, List[ToolResult]]:
@@ -1061,6 +1086,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Auto-commit repository changes once reviewer approves.",
     )
     parser.add_argument(
+        "--auto-push-final",
+        action="store_true",
+        help="Auto-push repository changes once reviewer approves (runs `git push`).",
+    )
+    parser.add_argument(
         "--commit-template",
         default=DEFAULT_COMMIT_TEMPLATE,
         help="Template for auto-commit messages (placeholders: {turn}, {summary}, {final_summary}).",
@@ -1168,6 +1198,7 @@ async def main_async(args: argparse.Namespace) -> None:
             recorder=recorder,
             auto_commit_each_turn=args.auto_commit_each_turn,
             auto_commit_final=args.auto_commit_final,
+            auto_push_final=args.auto_push_final,
             commit_template=args.commit_template,
             initial_state=recorder.get_state(),
         )
