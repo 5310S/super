@@ -86,6 +86,7 @@ class SupervisorTab(tk.Frame):
         self._auto_restart_requested = False
         self._auto_restart_pending = False
         self._restart_reason = ""
+        self._user_stop_requested = False
         self._stop_after_prompt_requested = False
         self.last_command: list[str] | None = None
         self._sleep_process: subprocess.Popen | None = None
@@ -108,6 +109,7 @@ class SupervisorTab(tk.Frame):
         self.reviewer_args_var = tk.StringVar()
         self.show_json_var = tk.BooleanVar(value=False)
         self.context_threshold_var = tk.StringVar()
+        self.carousel_var = tk.BooleanVar(value=False)
         self.prevent_screen_sleep_var = tk.BooleanVar(value=False)
         self.prevent_computer_sleep_var = tk.BooleanVar(value=False)
         self._register_setting("config_path", self.config_var)
@@ -121,6 +123,7 @@ class SupervisorTab(tk.Frame):
         self._register_setting("reviewer_args", self.reviewer_args_var)
         self._register_setting("show_json", self.show_json_var)
         self._register_setting("context_threshold_percent", self.context_threshold_var)
+        self._register_setting("carousel", self.carousel_var)
         self._register_setting("prevent_screen_sleep", self.prevent_screen_sleep_var)
         self._register_setting("prevent_computer_sleep", self.prevent_computer_sleep_var)
         self._build_widgets()
@@ -205,15 +208,21 @@ class SupervisorTab(tk.Frame):
 
         tk.Checkbutton(
             config_frame,
+            text="Carousel: restart automatically after exit code 0",
+            variable=self.carousel_var,
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(5, 0))
+
+        tk.Checkbutton(
+            config_frame,
             text="Keep screen awake while supervisor runs",
             variable=self.prevent_screen_sleep_var,
-        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(5, 0))
 
         tk.Checkbutton(
             config_frame,
             text="Keep computer awake even if display sleeps",
             variable=self.prevent_computer_sleep_var,
-        ).grid(row=10, column=0, columnspan=2, sticky="w")
+        ).grid(row=11, column=0, columnspan=2, sticky="w")
 
         config_frame.columnconfigure(1, weight=1)
         self.auto_push_var.trace_add("write", lambda *_: self._refresh_auto_push_button())
@@ -321,6 +330,7 @@ class SupervisorTab(tk.Frame):
             return
         self._auto_restart_pending = False
         self._restart_reason = ""
+        self._user_stop_requested = False
         self._reset_graceful_stop_state()
         self._launch_supervisor(cmd, remember=True)
 
@@ -411,6 +421,7 @@ class SupervisorTab(tk.Frame):
         if not self.process:
             self._stop_sleep_prevention()
             return
+        self._user_stop_requested = not auto
         if auto:
             self._auto_restart_pending = True
         else:
@@ -621,6 +632,8 @@ class SupervisorTab(tk.Frame):
     def _check_process(self) -> None:
         if self.process and self.process.poll() is not None:
             code = self.process.returncode
+            manual_stop = self._user_stop_requested
+            self._user_stop_requested = False
             self._log_line(f"\nSupervisor exited with code {code}\n")
             self.process = None
             self._stop_sleep_prevention()
@@ -634,6 +647,11 @@ class SupervisorTab(tk.Frame):
                 self._auto_restart_requested = False
             if self._auto_restart_pending and self.last_command:
                 self._auto_restart_pending = False
+                self.after(500, self._restart_supervisor)
+                return
+            carousel_enabled = bool(self.carousel_var.get())
+            if carousel_enabled and code == 0 and self.last_command and not manual_stop and not self._destroyed:
+                self._restart_reason = "carousel enabled"
                 self.after(500, self._restart_supervisor)
                 return
             if code not in (0, None):
@@ -688,10 +706,13 @@ class SupervisorGUI(tk.Tk):
         self.tabs: dict[str, SupervisorTab] = {}
         self._next_tab_index = 1
         self._attention_states: dict[str, dict[str, Any]] = {}
+        self._gatekeeper_help_dismissed = False
+        self._gatekeeper_help_shown = False
         self._build_widgets()
         self._load_settings()
         self._bind_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after_idle(self._maybe_show_gatekeeper_help)
 
     def _build_widgets(self) -> None:
         toolbar = tk.Frame(self)
@@ -701,6 +722,7 @@ class SupervisorGUI(tk.Tk):
         self.close_tab_button.pack(side=tk.LEFT, padx=5)
         self.rename_tab_button = tk.Button(toolbar, text="Rename Tab", command=self.rename_current_tab)
         self.rename_tab_button.pack(side=tk.LEFT)
+        tk.Button(toolbar, text="Gatekeeper Help", command=self._force_gatekeeper_help).pack(side=tk.LEFT, padx=10)
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -892,6 +914,7 @@ class SupervisorGUI(tk.Tk):
             "tabs": self._collect_tabs_state(),
             "active_tab": None,
             "next_tab_index": self._next_tab_index,
+            "gatekeeper_help_dismissed": self._gatekeeper_help_dismissed,
         }
         active_widget = self.notebook.select()
         if active_widget:
@@ -917,6 +940,8 @@ class SupervisorGUI(tk.Tk):
             stored_next = raw.get("next_tab_index")
             if isinstance(stored_next, int) and stored_next > 0:
                 self._next_tab_index = stored_next
+            if isinstance(raw.get("gatekeeper_help_dismissed"), bool):
+                self._gatekeeper_help_dismissed = bool(raw["gatekeeper_help_dismissed"])
             tabs_data = raw.get("tabs") or []
             for tab_data in tabs_data:
                 tab_id = tab_data.get("id") or self._generate_tab_id()
@@ -951,6 +976,66 @@ class SupervisorGUI(tk.Tk):
                 subprocess.run(["xdg-open", str(log_dir)], check=False)
         except OSError as exc:
             messagebox.showerror(APP_TITLE, f"Failed to open log directory: {exc}")
+
+    def _maybe_show_gatekeeper_help(self) -> None:
+        if sys.platform != "darwin":
+            return
+        if self._gatekeeper_help_shown:
+            return
+        if self._gatekeeper_help_dismissed:
+            return
+        self._gatekeeper_help_shown = True
+        self._show_gatekeeper_popup(force=False)
+
+    def _force_gatekeeper_help(self) -> None:
+        if sys.platform != "darwin":
+            messagebox.showinfo(APP_TITLE, "Gatekeeper help is only relevant on macOS.")
+            return
+        self._show_gatekeeper_popup(force=True)
+
+    def _show_gatekeeper_popup(self, *, force: bool) -> None:
+        popup = tk.Toplevel(self)
+        popup.title("Open Anyway on macOS")
+        popup.geometry("520x360")
+        popup.grab_set()
+        popup.transient(self)
+
+        message = (
+            "macOS Gatekeeper blocks unsigned apps. If you see\n"
+            "\"Apple cannot verify the app is free of malware\":\n\n"
+            "1) Open System Settings → Privacy & Security.\n"
+            "2) Scroll to Security and click \"Open Anyway\".\n"
+            "3) Confirm and reopen the app.\n\n"
+            "Or, from Terminal (once) to remove the quarantine flag:\n"
+            "xattr -dr com.apple.quarantine /Applications/Codex\\ Supervisor.app"
+        )
+        tk.Message(popup, text=message, width=480, justify="left").pack(padx=15, pady=15, anchor="w")
+
+        cmd = "xattr -dr com.apple.quarantine /Applications/Codex\\ Supervisor.app"
+        buttons = tk.Frame(popup)
+        buttons.pack(fill=tk.X, padx=15, pady=(0, 10))
+
+        def copy_cmd() -> None:
+            try:
+                popup.clipboard_clear()
+                popup.clipboard_append(cmd)
+            except tk.TclError:
+                return
+            messagebox.showinfo(APP_TITLE, "Command copied. Paste into Terminal and run.")
+
+        tk.Button(buttons, text="Copy Terminal command", command=copy_cmd).pack(side=tk.LEFT)
+        dont_show_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(buttons, text="Don't show again", variable=dont_show_var).pack(side=tk.RIGHT)
+
+        def close_popup() -> None:
+            if not self._gatekeeper_help_dismissed or force:
+                self._gatekeeper_help_dismissed = bool(dont_show_var.get())
+                if self._gatekeeper_help_dismissed:
+                    self.schedule_save()
+            popup.destroy()
+
+        tk.Button(popup, text="Got it", command=close_popup).pack(pady=(0, 12))
+        popup.protocol("WM_DELETE_WINDOW", close_popup)
 
     def _on_close(self) -> None:
         running_tabs = [tab for tab in self.tabs.values() if tab.is_running()]

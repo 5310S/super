@@ -84,13 +84,24 @@ def make_tab() -> gui.SupervisorTab:
     tab._auto_restart_requested = False
     tab._auto_restart_pending = False
     tab._restart_reason = ""
+    tab._user_stop_requested = False
     tab._stop_after_prompt_requested = False
+    tab._destroyed = False
+    tab.after = lambda delay, func=None, *args: func(*args) if func else None
+    tab.after_cancel = lambda job: None
     tab.last_command = None
     tab.process = None
+    tab.controller = mock.Mock()
     tab.prevent_screen_sleep_var = DummyBooleanVar(False)
     tab.prevent_computer_sleep_var = DummyBooleanVar(False)
     tab.auto_push_var = DummyBooleanVar(False)
+    tab.carousel_var = DummyBooleanVar(False)
     tab.auto_push_button = DummyButton()
+    tab.start_button = DummyButton()
+    tab.stop_button = DummyButton()
+    tab.timer_var = DummyVar("00:00:00")
+    tab._timer_job = None
+    tab._timer_start = None
     tab._sleep_process = None
     tab._sleep_warning_shown = False
     tab.stop_after_prompt_button = DummyButton()
@@ -185,6 +196,41 @@ class SupervisorTabUnitTests(unittest.TestCase):
                 gui.sys.platform = original_platform
         popen.assert_not_called()
         self.assertIsNone(tab._sleep_process)
+
+    def test_carousel_restarts_after_clean_exit(self) -> None:
+        tab = make_tab()
+        tab.carousel_var = DummyBooleanVar(True)
+        tab.last_command = ["python", "gui.py"]
+        restarts: list[str] = []
+        tab._restart_supervisor = lambda: restarts.append("restart")
+
+        proc = mock.Mock()
+        proc.returncode = 0
+        proc.poll.return_value = 0
+        tab.process = proc
+
+        tab._check_process()
+
+        self.assertEqual(restarts, ["restart"])
+        self.assertIsNone(tab.process)
+
+    def test_carousel_skipped_after_manual_stop(self) -> None:
+        tab = make_tab()
+        tab.carousel_var = DummyBooleanVar(True)
+        tab.last_command = ["python", "gui.py"]
+        restarts: list[str] = []
+        tab._restart_supervisor = lambda: restarts.append("restart")
+
+        proc = mock.Mock()
+        proc.returncode = 0
+        proc.poll.return_value = 0
+        tab.process = proc
+        tab._user_stop_requested = True
+
+        tab._check_process()
+
+        self.assertEqual(restarts, [])
+        tab.controller.tab_finished.assert_called_once_with(tab)
 
 
 class SupervisorGUIUnitTests(unittest.TestCase):
