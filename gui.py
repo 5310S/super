@@ -93,6 +93,7 @@ class SupervisorTab(tk.Frame):
         self._sleep_warning_shown = False
         self._context_stats: dict[str, dict[str, float] | None] = {"Builder": None, "Reviewer": None}
         self.timer_var = tk.StringVar(value="00:00:00")
+        self.carousel_rotations_var = tk.IntVar(value=0)
         self._timer_start: float | None = None
         self._timer_job: str | None = None
         self._drain_job: str | None = None
@@ -244,8 +245,16 @@ class SupervisorTab(tk.Frame):
         self.stop_after_prompt_button.pack(side=tk.LEFT, padx=5)
         tk.Button(controls, text="Open Logs Folder", command=self.controller.open_logs_folder).pack(side=tk.LEFT, padx=5)
 
-        timer_frame = tk.Frame(controls)
-        timer_frame.pack(side=tk.RIGHT)
+        stats_frame = tk.Frame(controls)
+        stats_frame.pack(side=tk.RIGHT)
+
+        rotations_frame = tk.Frame(stats_frame)
+        rotations_frame.pack(side=tk.LEFT, padx=(0, 15))
+        tk.Label(rotations_frame, text="Carousel Rotations:").pack(side=tk.LEFT)
+        tk.Label(rotations_frame, textvariable=self.carousel_rotations_var).pack(side=tk.LEFT, padx=(2, 0))
+
+        timer_frame = tk.Frame(stats_frame)
+        timer_frame.pack(side=tk.LEFT)
         tk.Label(timer_frame, text="Elapsed:").pack(side=tk.LEFT)
         tk.Label(timer_frame, textvariable=self.timer_var).pack(side=tk.LEFT, padx=(2, 0))
 
@@ -332,6 +341,7 @@ class SupervisorTab(tk.Frame):
         self._restart_reason = ""
         self._user_stop_requested = False
         self._reset_graceful_stop_state()
+        self._reset_carousel_rotations()
         self._launch_supervisor(cmd, remember=True)
 
     def stop_after_prompt(self) -> None:
@@ -538,6 +548,16 @@ class SupervisorTab(tk.Frame):
         self._timer_start = None
         self.timer_var.set("00:00:00")
 
+    def _reset_carousel_rotations(self) -> None:
+        self.carousel_rotations_var.set(0)
+
+    def _increment_carousel_rotations(self) -> None:
+        try:
+            current = int(self.carousel_rotations_var.get())
+        except (TypeError, ValueError):
+            current = 0
+        self.carousel_rotations_var.set(current + 1)
+
     def _handle_log_line(self, line: str) -> None:
         self._update_context_from_line(line)
         self._maybe_stop_after_current_turn(line)
@@ -651,6 +671,7 @@ class SupervisorTab(tk.Frame):
                 return
             carousel_enabled = bool(self.carousel_var.get())
             if carousel_enabled and code == 0 and self.last_command and not manual_stop and not self._destroyed:
+                self._increment_carousel_rotations()
                 self._restart_reason = "carousel enabled"
                 self.after(500, self._restart_supervisor)
                 return

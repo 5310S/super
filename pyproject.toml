@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-supervisor"
-version = "0.1.0"
+version = "0.1.2"
 description = "Two-agent Codex supervisor with protocol automation and logging"
 authors = [{name = "5310S"}]
 readme = "README.md"

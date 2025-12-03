@@ -96,6 +96,7 @@ def make_tab() -> gui.SupervisorTab:
     tab.prevent_computer_sleep_var = DummyBooleanVar(False)
     tab.auto_push_var = DummyBooleanVar(False)
     tab.carousel_var = DummyBooleanVar(False)
+    tab.carousel_rotations_var = DummyVar(0)
     tab.auto_push_button = DummyButton()
     tab.start_button = DummyButton()
     tab.stop_button = DummyButton()
@@ -213,6 +214,7 @@ class SupervisorTabUnitTests(unittest.TestCase):
 
         self.assertEqual(restarts, ["restart"])
         self.assertIsNone(tab.process)
+        self.assertEqual(tab.carousel_rotations_var.get(), 1)
 
     def test_carousel_skipped_after_manual_stop(self) -> None:
         tab = make_tab()
@@ -231,6 +233,37 @@ class SupervisorTabUnitTests(unittest.TestCase):
 
         self.assertEqual(restarts, [])
         tab.controller.tab_finished.assert_called_once_with(tab)
+        self.assertEqual(tab.carousel_rotations_var.get(), 0)
+
+    def test_carousel_rotations_not_incremented_when_disabled(self) -> None:
+        tab = make_tab()
+        tab.carousel_var = DummyBooleanVar(False)
+        tab.last_command = ["python", "gui.py"]
+        tab.carousel_rotations_var = DummyVar(0)
+        restarts: list[str] = []
+        tab._restart_supervisor = lambda: restarts.append("restart")
+
+        proc = mock.Mock()
+        proc.returncode = 0
+        proc.poll.return_value = 0
+        tab.process = proc
+
+        tab._check_process()
+
+        self.assertEqual(restarts, [])
+        self.assertEqual(tab.carousel_rotations_var.get(), 0)
+
+    def test_carousel_rotations_reset_helper(self) -> None:
+        tab = make_tab()
+        tab.carousel_rotations_var = DummyVar(5)
+        tab._reset_carousel_rotations()
+        self.assertEqual(tab.carousel_rotations_var.get(), 0)
+
+    def test_carousel_rotations_increment_recovers_from_invalid_state(self) -> None:
+        tab = make_tab()
+        tab.carousel_rotations_var = DummyVar("not-an-int")
+        tab._increment_carousel_rotations()
+        self.assertEqual(tab.carousel_rotations_var.get(), 1)
 
 
 class SupervisorGUIUnitTests(unittest.TestCase):
