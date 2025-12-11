@@ -76,6 +76,8 @@ class DummyButton:
 
 
 def make_tab() -> gui.SupervisorTab:
+    gui.SupervisorTab._lid_sleep_requests = 0
+    gui.SupervisorTab._lid_sleep_baseline = None
     tab = gui.SupervisorTab.__new__(gui.SupervisorTab)
     tab.output_text = DummyText()
     tab._handle_log_line = lambda line: None
@@ -87,6 +89,7 @@ def make_tab() -> gui.SupervisorTab:
     tab._user_stop_requested = False
     tab._stop_after_prompt_requested = False
     tab._destroyed = False
+    tab._lid_sleep_prevent_active = False
     tab.after = lambda delay, func=None, *args: func(*args) if func else None
     tab.after_cancel = lambda job: None
     tab.last_command = None
@@ -94,6 +97,7 @@ def make_tab() -> gui.SupervisorTab:
     tab.controller = mock.Mock()
     tab.prevent_screen_sleep_var = DummyBooleanVar(False)
     tab.prevent_computer_sleep_var = DummyBooleanVar(False)
+    tab.prevent_lid_sleep_var = DummyBooleanVar(False)
     tab.auto_push_var = DummyBooleanVar(False)
     tab.carousel_var = DummyBooleanVar(False)
     tab.carousel_rotations_var = DummyVar(0)
@@ -184,18 +188,51 @@ class SupervisorTabUnitTests(unittest.TestCase):
         tab._stop_sleep_prevention()
         fake_proc.terminate.assert_called_once()
 
+    def test_lid_sleep_prevention_uses_pmset(self) -> None:
+        tab = make_tab()
+        tab.process = object()
+        tab.prevent_lid_sleep_var = DummyBooleanVar(True)
+        fake_proc = mock.Mock()
+        fake_proc.wait.return_value = None
+
+        pmset_calls: list[list[str]] = []
+
+        def fake_run(args, capture_output=True, text=True, check=False):
+            pmset_calls.append(args)
+            if args[:3] == ["pmset", "-g"]:
+                return mock.Mock(returncode=0, stdout="SleepDisabled 0\n", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(gui.subprocess, "run", side_effect=fake_run) as run_call, mock.patch.object(
+            gui.subprocess, "Popen", return_value=fake_proc
+        ) as popen, mock.patch.object(gui.sys, "platform", "darwin"):
+            tab._start_sleep_prevention()
+            self.assertTrue(tab._lid_sleep_prevent_active)
+            self.assertEqual(gui.SupervisorTab._lid_sleep_requests, 1)
+            popen.assert_called_once_with(["caffeinate", "-i"])
+            run_call.assert_any_call(["pmset", "-a", "disablesleep", "1"], capture_output=True, text=True, check=False)
+            tab._stop_sleep_prevention()
+
+        self.assertFalse(tab._lid_sleep_prevent_active)
+        self.assertEqual(gui.SupervisorTab._lid_sleep_requests, 0)
+        self.assertIn(["pmset", "-a", "disablesleep", "0"], pmset_calls)
+
     def test_sleep_prevention_noop_off_macos(self) -> None:
         tab = make_tab()
         tab.process = object()
         tab.prevent_screen_sleep_var = DummyBooleanVar(True)
+        tab.prevent_lid_sleep_var = DummyBooleanVar(True)
         original_platform = gui.sys.platform
-        with mock.patch.object(gui.subprocess, "Popen") as popen:
+        with mock.patch.object(gui.subprocess, "Popen") as popen, mock.patch.object(
+            gui.subprocess, "run"
+        ) as run_call:
             gui.sys.platform = "linux"
             try:
                 tab._start_sleep_prevention()
             finally:
                 gui.sys.platform = original_platform
         popen.assert_not_called()
+        run_call.assert_not_called()
         self.assertIsNone(tab._sleep_process)
 
     def test_carousel_restarts_after_clean_exit(self) -> None:

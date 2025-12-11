@@ -8,6 +8,7 @@ import os
 import pathlib
 import queue
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -68,6 +69,9 @@ _maybe_run_cli()
 class SupervisorTab(tk.Frame):
     """A single supervisor instance hosted inside the GUI notebook."""
 
+    _lid_sleep_requests: int = 0
+    _lid_sleep_baseline: int | None = None
+
     def __init__(
         self,
         master: tk.Misc,
@@ -91,6 +95,7 @@ class SupervisorTab(tk.Frame):
         self.last_command: list[str] | None = None
         self._sleep_process: subprocess.Popen | None = None
         self._sleep_warning_shown = False
+        self._lid_sleep_prevent_active = False
         self._context_stats: dict[str, dict[str, float] | None] = {"Builder": None, "Reviewer": None}
         self.timer_var = tk.StringVar(value="00:00:00")
         self.carousel_rotations_var = tk.IntVar(value=0)
@@ -113,6 +118,7 @@ class SupervisorTab(tk.Frame):
         self.carousel_var = tk.BooleanVar(value=False)
         self.prevent_screen_sleep_var = tk.BooleanVar(value=False)
         self.prevent_computer_sleep_var = tk.BooleanVar(value=False)
+        self.prevent_lid_sleep_var = tk.BooleanVar(value=False)
         self._register_setting("config_path", self.config_var)
         self._register_setting("objective", self.objective_var)
         self._register_setting("repo_path", self.repo_var)
@@ -127,6 +133,8 @@ class SupervisorTab(tk.Frame):
         self._register_setting("carousel", self.carousel_var)
         self._register_setting("prevent_screen_sleep", self.prevent_screen_sleep_var)
         self._register_setting("prevent_computer_sleep", self.prevent_computer_sleep_var)
+        self._register_setting("prevent_lid_sleep", self.prevent_lid_sleep_var)
+        self._lid_notice_ack = tk.BooleanVar(value=False)
         self._build_widgets()
         if state:
             self._apply_state(state)
@@ -224,6 +232,12 @@ class SupervisorTab(tk.Frame):
             text="Keep computer awake even if display sleeps",
             variable=self.prevent_computer_sleep_var,
         ).grid(row=11, column=0, columnspan=2, sticky="w")
+
+        tk.Checkbutton(
+            config_frame,
+            text="Prevent sleep when lid is closed (macOS, requires admin)",
+            variable=self.prevent_lid_sleep_var,
+        ).grid(row=12, column=0, columnspan=2, sticky="w", pady=(0, 5))
 
         config_frame.columnconfigure(1, weight=1)
         self.auto_push_var.trace_add("write", lambda *_: self._refresh_auto_push_button())
@@ -334,6 +348,9 @@ class SupervisorTab(tk.Frame):
             messagebox.showwarning(APP_TITLE, "Supervisor is already running in this tab.")
             return
         self.controller.clear_attention(self)
+        if self.prevent_lid_sleep_var.get() and not self._lid_sleep_notice_shown():
+            if not self._show_lid_sleep_notice():
+                return
         cmd = self._build_command()
         if not cmd:
             return
@@ -478,13 +495,18 @@ class SupervisorTab(tk.Frame):
             return
         keep_screen = bool(self.prevent_screen_sleep_var.get())
         keep_system = bool(self.prevent_computer_sleep_var.get())
-        if not (keep_screen or keep_system):
+        keep_lid = bool(self.prevent_lid_sleep_var.get())
+        if keep_lid and not keep_system:
+            keep_system = True
+        if not (keep_screen or keep_system or keep_lid):
             return
         if sys.platform != "darwin":
             if not self._sleep_warning_shown:
                 self._sleep_warning_shown = True
-                self._log_line("\nSleep prevention requires macOS (caffeinate). Options ignored.\n")
+                self._log_line("\nSleep prevention requires macOS (caffeinate/pmset). Options ignored.\n")
             return
+        if keep_lid:
+            self._enable_lid_sleep_prevention()
         args = ["caffeinate"]
         if keep_screen:
             args.append("-d")
@@ -500,20 +522,225 @@ class SupervisorTab(tk.Frame):
 
     def _stop_sleep_prevention(self) -> None:
         proc = self._sleep_process
-        if not proc:
-            return
         self._sleep_process = None
-        try:
-            proc.terminate()
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
+        lid_prevented = self._lid_sleep_prevent_active
+        if proc:
             try:
-                proc.kill()
+                proc.terminate()
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
             except OSError:
                 pass
+        self._restore_lid_sleep_prevention()
+        if proc or lid_prevented:
+            self._log_line("\nSleep prevention disabled.\n")
+
+    def _enable_lid_sleep_prevention(self) -> None:
+        if self._lid_sleep_prevent_active:
+            return
+        if SupervisorTab._lid_sleep_requests > 0:
+            SupervisorTab._lid_sleep_requests += 1
+            self._lid_sleep_prevent_active = True
+            return
+        SupervisorTab._lid_sleep_baseline = self._read_sleep_disabled_value()
+        try:
+            result = subprocess.run(
+                ["pmset", "-a", "disablesleep", "1"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            SupervisorTab._lid_sleep_baseline = None
+            self._log_line(f"\nFailed to change lid sleep setting: {exc}\n")
+            return
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            message = detail or f"pmset exited with {result.returncode}"
+            SupervisorTab._lid_sleep_baseline = None
+            self._log_line(
+                f"\nCould not disable lid sleep (pmset -a disablesleep 1): {message} "
+                "(try running with admin rights).\n"
+            )
+            return
+        SupervisorTab._lid_sleep_requests += 1
+        self._lid_sleep_prevent_active = True
+        self._log_line("\nLid-close sleep disabled (pmset -a disablesleep 1).\n")
+
+    def _restore_lid_sleep_prevention(self) -> None:
+        if not self._lid_sleep_prevent_active:
+            return
+        self._lid_sleep_prevent_active = False
+        if SupervisorTab._lid_sleep_requests > 0:
+            SupervisorTab._lid_sleep_requests -= 1
+        if SupervisorTab._lid_sleep_requests > 0:
+            return
+        target_value = SupervisorTab._lid_sleep_baseline
+        if target_value is None:
+            target_value = 0
+        SupervisorTab._lid_sleep_baseline = None
+        try:
+            result = subprocess.run(
+                ["pmset", "-a", "disablesleep", str(target_value)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            self._log_line(f"\nFailed to restore lid sleep setting: {exc}\n")
+            return
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            message = detail or f"pmset exited with {result.returncode}"
+            self._log_line(
+                f"\nCould not restore lid sleep setting (pmset -a disablesleep {target_value}): {message}\n"
+            )
+
+    def _read_sleep_disabled_value(self) -> int | None:
+        try:
+            result = subprocess.run(
+                ["pmset", "-g"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         except OSError:
-            pass
-        self._log_line("\nSleep prevention disabled.\n")
+            return None
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            if "SleepDisabled" not in line:
+                continue
+            try:
+                value = int(line.split()[-1])
+                return value
+            except (IndexError, ValueError):
+                return None
+        return None
+
+    def _lid_sleep_notice_shown(self) -> bool:
+        return self._lid_notice_ack.get() or self.controller._lid_notice_dismissed
+
+    def _show_lid_sleep_notice(self) -> bool:
+        if sys.platform != "darwin":
+            return True
+        popup = tk.Toplevel(self)
+        popup.title("Lid-close sleep prevention")
+        popup.geometry("520x300")
+        popup.grab_set()
+        popup.transient(self)
+
+        message = (
+            "Disabling lid-close sleep uses 'pmset -a disablesleep 1', which typically requires admin rights. "
+            "If the app isn't run via sudo, macOS may block the change and the lid may still sleep.\\n\\n"
+            "Options:\\n"
+            " - Continue (best-effort; errors are logged)\\n"
+            " - Copy the sudo launch command to clipboard and relaunch\\n"
+            " - Don't show this again"
+        )
+        tk.Message(popup, text=message, width=480, justify="left").pack(padx=15, pady=15, anchor="w")
+
+        dont_show_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(popup, text="Don't show again", variable=dont_show_var).pack(padx=15, anchor="w")
+
+        def run_admin() -> None:
+            def worker() -> None:
+                success = self._launch_as_admin()
+
+                def finish() -> None:
+                    if success:
+                        messagebox.showinfo(
+                            APP_TITLE,
+                            "Admin relaunch requested. macOS may prompt for your password. "
+                            "Once the new window opens, close this one.",
+                        )
+                        if dont_show_var.get():
+                            self.controller._lid_notice_dismissed = True
+                            self.controller.schedule_save()
+                        self._lid_notice_ack.set(True)
+                        popup.destroy()
+                    else:
+                        messagebox.showerror(APP_TITLE, "Failed to request admin relaunch. See log for details.")
+
+                try:
+                    self.after(0, finish)
+                except tk.TclError:
+                    pass
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def copy_cmd() -> None:
+            cmd = f"sudo \\\"{sys.executable}\\\" {CLI_SENTINEL} --repo-path {self.repo_var.get() or '.'}"
+            try:
+                popup.clipboard_clear()
+                popup.clipboard_append(cmd)
+            except tk.TclError:
+                pass
+            messagebox.showinfo(APP_TITLE, "Command copied. Paste into Terminal and run.")
+
+        def accept() -> None:
+            if dont_show_var.get():
+                self.controller._lid_notice_dismissed = True
+                self.controller.schedule_save()
+            self._lid_notice_ack.set(True)
+            popup.destroy()
+
+        def cancel() -> None:
+            popup.destroy()
+
+        buttons = tk.Frame(popup)
+        buttons.pack(fill=tk.X, padx=15, pady=(0, 12))
+        tk.Button(buttons, text="Copy sudo command", command=copy_cmd).pack(side=tk.LEFT)
+        tk.Button(buttons, text="Run as admin", command=run_admin).pack(side=tk.LEFT, padx=8)
+        tk.Button(buttons, text="Continue", command=accept).pack(side=tk.LEFT, padx=8)
+        tk.Button(buttons, text="Cancel", command=cancel).pack(side=tk.LEFT)
+        popup.protocol("WM_DELETE_WINDOW", cancel)
+        popup.wait_window()
+        return self._lid_sleep_notice_shown()
+
+    def _admin_launch_target(self) -> str | None:
+        try:
+            return str(pathlib.Path(sys.argv[0]).resolve())
+        except OSError:
+            return None
+
+    def _launch_as_admin(self) -> bool:
+        target = self._admin_launch_target()
+        if not target:
+            self._log_line("\nUnable to determine app path for admin relaunch.\n")
+            return False
+        path = pathlib.Path(target)
+        app_path = None
+        for parent in path.parents:
+            if parent.suffix == ".app":
+                app_path = parent
+                break
+        if app_path is not None:
+            cmd = f"open {shlex.quote(str(app_path))}"
+        else:
+            cmd = shlex.quote(str(path))
+        script = f'do shell script "{cmd}" with administrator privileges'
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            self._log_line(f"\nAdmin relaunch failed (osascript error): {exc}\n")
+            return False
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            msg = detail or f"osascript exited with {result.returncode}"
+            self._log_line(f"\nAdmin relaunch failed: {msg}\n")
+            return False
+        self._log_line("\nAdmin relaunch initiated. macOS may prompt for your password.\n")
+        return True
 
     def _start_timer(self) -> None:
         if self._timer_job:
@@ -729,6 +956,7 @@ class SupervisorGUI(tk.Tk):
         self._attention_states: dict[str, dict[str, Any]] = {}
         self._gatekeeper_help_dismissed = False
         self._gatekeeper_help_shown = False
+        self._lid_notice_dismissed = False
         self._build_widgets()
         self._load_settings()
         self._bind_shortcuts()
@@ -936,6 +1164,7 @@ class SupervisorGUI(tk.Tk):
             "active_tab": None,
             "next_tab_index": self._next_tab_index,
             "gatekeeper_help_dismissed": self._gatekeeper_help_dismissed,
+            "lid_notice_dismissed": self._lid_notice_dismissed,
         }
         active_widget = self.notebook.select()
         if active_widget:
@@ -963,6 +1192,8 @@ class SupervisorGUI(tk.Tk):
                 self._next_tab_index = stored_next
             if isinstance(raw.get("gatekeeper_help_dismissed"), bool):
                 self._gatekeeper_help_dismissed = bool(raw["gatekeeper_help_dismissed"])
+            if isinstance(raw.get("lid_notice_dismissed"), bool):
+                self._lid_notice_dismissed = bool(raw["lid_notice_dismissed"])
             tabs_data = raw.get("tabs") or []
             for tab_data in tabs_data:
                 tab_id = tab_data.get("id") or self._generate_tab_id()
